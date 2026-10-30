@@ -37,11 +37,12 @@ export function formatDuration(totalSeconds: number): string {
   return `${minutes}:${String(seconds).padStart(2, '0')}`;
 }
 
-export function buildOutputFileName(audioName: string, extension = 'mp4'): string {
+export function buildOutputFileName(audioName: string, extension = 'mp4', suffix = ''): string {
   const sanitizedBase = (audioName || 'video')
     .replace(/\.[^/.]+$/, '')
     .replace(/\s+/g, '-')
     .replace(/[^a-zA-Z0-9._-]/g, '');
 
-  return `${sanitizedBase || 'video'}-${Date.now()}.${extension}`;
+  const sanitizedSuffix = suffix.replace(/[^a-zA-Z0-9_-]/g, '');
+  return `${sanitizedBase || 'video'}${sanitizedSuffix ? `-${sanitizedSuffix}` : ''}-${Date.now()}.${extension}`;
 }

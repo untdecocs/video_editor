@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   defaultTransform,
+  formatAspectRatio,
   getClipDuration,
   getTimelineDuration,
   moveClip,
@@ -55,4 +56,7 @@ test('keeps common platform presets available', () => {
     { ...platformPresets.find((preset) => preset.id === 'tiktok') },
     { id: 'tiktok', platform: 'TikTok', placement: 'Video', width: 1080, height: 1920 },
   );
+  assert.equal(formatAspectRatio(1920, 1080), '16:9');
+  assert.equal(formatAspectRatio(1080, 1920), '9:16');
+  assert.equal(formatAspectRatio(1000, 1500), '2:3');
 });

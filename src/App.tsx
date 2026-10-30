@@ -7,6 +7,7 @@ import { buildOutputFileName, formatDuration, formatFileSize } from './services/
 import { getSupportedMimeType, renderVideo } from './services/videoExport';
 import {
   defaultTransform,
+  formatAspectRatio,
   getClipDuration,
   getTimelineDuration,
   moveClip,
@@ -244,7 +245,7 @@ function App() {
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = buildOutputFileName(audioFile.name, format.toLowerCase());
+      link.download = buildOutputFileName(audioFile.name, format.toLowerCase(), preset.id);
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       setExportProgress(100);
@@ -337,6 +338,24 @@ function App() {
             <div><h2 className="text-xl font-semibold">Preview and edit</h2><p className="mt-1 text-sm text-neutral-500">{audioFile?.name} · {formatDuration(audioDuration)} soundtrack</p></div>
             <div className="flex items-center gap-2 text-xs text-neutral-500"><span className="h-2 w-2 rounded-full bg-lime-500" />Autosaved in this session</div>
           </div>
+          <div className="border border-neutral-200 bg-white p-5">
+            <div className="grid gap-4 sm:grid-cols-[minmax(0,1fr)_minmax(240px,1fr)] sm:items-end">
+              <div>
+                <h3 className="text-sm font-semibold">Video dimensions</h3>
+                <p className="mt-1 text-xs text-neutral-500">Choose where you’ll share your video. The preview and export update to match.</p>
+              </div>
+              <label className="text-xs font-semibold text-neutral-600">Social media platform
+                <select className="mt-2 w-full border border-neutral-300 bg-white px-3 py-3 text-sm font-normal text-ink" value={presetId} onChange={(event) => setPresetId(event.target.value)}>
+                  {platformPresets.map((item) => <option key={item.id} value={item.id}>{item.platform} · {item.placement} · {formatAspectRatio(item.width, item.height)} ({item.width} × {item.height})</option>)}
+                </select>
+              </label>
+            </div>
+            {presetId === 'custom' && <div className="mt-4 grid max-w-md grid-cols-2 gap-3">
+              <label className="text-xs font-semibold text-neutral-600">Width<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customWidth} onChange={(event) => setCustomWidth(Math.max(144, Number(event.target.value)))} /></label>
+              <label className="text-xs font-semibold text-neutral-600">Height<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customHeight} onChange={(event) => setCustomHeight(Math.max(144, Number(event.target.value)))} /></label>
+            </div>}
+            <p className="mt-3 text-xs text-neutral-600">Selected export size: <strong className="font-semibold text-ink">{width} × {height} · {formatAspectRatio(width, height)}</strong></p>
+          </div>
           <div className="grid items-start gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(390px,0.9fr)]">
             <div className="space-y-4">
               <CompositionPreview assets={assets} clips={clips} currentTime={currentTime} width={width} height={height} videoRef={previewVideoRef} />
@@ -344,25 +363,14 @@ function App() {
                 <button type="button" onClick={playPause} className="grid h-10 w-10 shrink-0 place-items-center bg-ink text-white" aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>{isPlaying ? 'Ⅱ' : '▶'}</button>
                 <div className="min-w-0 flex-1"><input aria-label="Preview position" type="range" min="0" max={audioDuration || 1} step="0.1" value={Math.min(currentTime, audioDuration || 0)} onChange={(event) => { const time = Number(event.target.value); setCurrentTime(time); if (audioRef.current) audioRef.current.currentTime = time; }} className="w-full accent-moss" /><div className="flex justify-between text-[11px] tabular-nums text-neutral-500"><span>{formatDuration(currentTime)}</span><span>{formatDuration(audioDuration)}</span></div></div>
               </div>
+              <TimelineEditor assets={assets} clips={clips} selectedClipId={selectedClipId} onSelect={setSelectedClipId} onChange={updateClip} onTransform={updateTransform} onMove={(from, to) => setClips((current) => moveClip(current, from, to))} onRemove={removeClip} onSplit={handleSplit} />
             </div>
             <aside className="space-y-5">
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-                <label className="text-xs font-semibold text-neutral-600">Platform and placement
-                  <select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={presetId} onChange={(event) => setPresetId(event.target.value)}>
-                    {platformPresets.map((item) => <option key={item.id} value={item.id}>{item.platform} · {item.placement} ({item.width} × {item.height})</option>)}
-                  </select>
-                </label>
-                {presetId === 'custom' && <div className="grid grid-cols-2 gap-3">
-                  <label className="text-xs font-semibold text-neutral-600">Width<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customWidth} onChange={(event) => setCustomWidth(Math.max(144, Number(event.target.value)))} /></label>
-                  <label className="text-xs font-semibold text-neutral-600">Height<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customHeight} onChange={(event) => setCustomHeight(Math.max(144, Number(event.target.value)))} /></label>
-                </div>}
-              </div>
               <div className="grid grid-cols-2 gap-3">
                 <label className="text-xs font-semibold text-neutral-600">File format<select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={format} onChange={(event) => setFormat(event.target.value)}><option>MP4</option><option>WebM</option></select></label>
                 <label className="text-xs font-semibold text-neutral-600">Frame rate<select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={frameRate} onChange={(event) => setFrameRate(Number(event.target.value))}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
               </div>
-              <div className="border-t border-neutral-200 pt-4"><div className="flex justify-between text-xs text-neutral-500"><span>Canvas</span><span className="font-medium text-ink">{width} × {height}</span></div><div className="mt-2 flex justify-between text-xs text-neutral-500"><span>Sequence</span><span className="font-medium text-ink">{formatDuration(Math.min(audioDuration, timelineDuration))} of {formatDuration(audioDuration)}</span></div><p className="mt-3 text-[11px] leading-relaxed text-neutral-500">Platform dimensions are starting presets. Check current platform requirements before publishing.</p></div>
-              <TimelineEditor assets={assets} clips={clips} selectedClipId={selectedClipId} onSelect={setSelectedClipId} onChange={updateClip} onTransform={updateTransform} onMove={(from, to) => setClips((current) => moveClip(current, from, to))} onRemove={removeClip} onSplit={handleSplit} />
+              <div className="border-t border-neutral-200 pt-4"><div className="flex justify-between text-xs text-neutral-500"><span>Export dimensions</span><span className="font-medium text-ink">{width} × {height} · {formatAspectRatio(width, height)}</span></div><div className="mt-2 flex justify-between text-xs text-neutral-500"><span>Sequence</span><span className="font-medium text-ink">{formatDuration(Math.min(audioDuration, timelineDuration))} of {formatDuration(audioDuration)}</span></div><p className="mt-3 text-[11px] leading-relaxed text-neutral-500">Platform presets set the exported video dimensions. Check current platform requirements before publishing.</p></div>
             </aside>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-4 border-t border-neutral-200 pt-5">

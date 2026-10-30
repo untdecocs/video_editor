@@ -56,6 +56,15 @@ export const platformPresets: PlatformPreset[] = [
   { id: 'custom', platform: 'Custom', placement: 'Set dimensions', width: 1920, height: 1080 },
 ];
 
+export function formatAspectRatio(width: number, height: number): string {
+  if (!Number.isInteger(width) || !Number.isInteger(height) || width <= 0 || height <= 0) {
+    return `${width}:${height}`;
+  }
+  const greatestCommonDivisor = (a: number, b: number): number => b === 0 ? a : greatestCommonDivisor(b, a % b);
+  const divisor = greatestCommonDivisor(width, height);
+  return `${width / divisor}:${height / divisor}`;
+}
+
 export function getClipDuration(clip: TimelineClip): number {
   return Math.max(0, clip.end - clip.start) || Math.max(0.1, clip.stillDuration);
 }
