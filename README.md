@@ -1,20 +1,30 @@
-# Audio Video Creator
+# Stillwave Social Video Studio
 
-A lightweight React + TypeScript app for building videos from an audio track and a static image. It includes drag-and-drop upload areas, playback controls, export settings, and browser-based video recording.
+A client-side React and TypeScript editor for combining one soundtrack with a sequence of images and video clips, framing the result for common social placements, and exporting through the browser's MediaRecorder API.
 
-## Scripts
+## Workflow
 
-- `npm install`
-- `npm run dev`
-- `npm run build`
+1. Add one audio track. Its duration determines the exported video's duration.
+2. Add multiple image or video clips. Video source audio is muted and is not included in the export.
+3. Preview and edit the sequence, select a platform size or custom dimensions, and create the video.
 
-## Design goals
+The visual timeline supports clip reordering, video trim in/out points, midpoint splitting, still-image duration, cut/fade transitions, fit/fill, zoom, horizontal and vertical repositioning, rotation, and flips. If visuals run out before the soundtrack, the final visual frame is held. Visuals are trimmed when the soundtrack ends.
 
-- Clean three-step workflow: add audio, add image, export video.
-- Responsive UI inspired by a minimalist desktop tool.
-- Clear export settings for format, resolution, and frame rate.
-- Modular component structure aligned with the project specification.
+## Platform presets
 
-## Export destination and format support
+Presets provide practical starting dimensions for YouTube landscape, Instagram Reels, TikTok, X/Twitter landscape, LinkedIn landscape, Pinterest video pins, Facebook Reels, and Snapchat Spotlight. Platform requirements can vary by placement and change over time; verify the target placement's current requirements before publishing. Custom dimensions are available.
 
-Use **Choose location** to select a filename and folder in browsers that support the File System Access API. Otherwise, the browser saves to its configured Downloads location. The export is recorded using the browser's `MediaRecorder`; MP4 is available only when the browser supports MP4 recording, while WebM support is more common.
+## Development
+
+```sh
+npm install
+npm run dev
+npm test
+npm run build
+```
+
+Timeline helper tests use Node's built-in test runner. The app uses Tailwind CSS for styling.
+
+## Browser export support
+
+Export is rendered locally with canvas capture, Web Audio, and `MediaRecorder`. MP4 and WebM availability depends on the browser's recorder implementation; the app checks supported MIME types before recording. Safari support varies by macOS/iOS release and selected codec. Exports can be CPU- and memory-intensive for long, high-resolution projects. The browser downloads the finished file when recording completes.
