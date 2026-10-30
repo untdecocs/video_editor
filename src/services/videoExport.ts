@@ -44,7 +44,7 @@ export async function renderVideo({
 
   const audioUrl = URL.createObjectURL(audioFile);
   const imageUrl = URL.createObjectURL(imageFile);
-  const audio = new Audio(audioUrl);
+  const audio = new Audio();
   const image = new Image();
   let audioContext: AudioContext | null = null;
   let canvasStream: MediaStream | null = null;
@@ -55,7 +55,7 @@ export async function renderVideo({
     await new Promise<void>((resolve, reject) => {
       audio.onloadedmetadata = () => resolve();
       audio.onerror = () => reject(new Error('The selected audio could not be decoded by this browser.'));
-      audio.load();
+      audio.src = audioUrl;
     });
 
     image.src = imageUrl;

@@ -89,6 +89,11 @@ function App() {
     });
 
   const handleAudioSelect = async (file: File) => {
+    if (file.size === 0) {
+      setStatusMessage('This audio file is empty. Choose a valid audio file and try again.');
+      return;
+    }
+
     const duration = await readAudioDuration(file);
     const objectUrl = URL.createObjectURL(file);
 
