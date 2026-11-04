@@ -1,42 +1,43 @@
-import { useEffect, useMemo, type RefObject } from 'react';
-import { defaultTransform, type TimelineAsset, type TimelineClip } from '../services/timeline';
-import { getClipDuration } from '../services/timeline';
+import { useEffect, useMemo, useRef } from 'react';
+import { defaultTransform, getActiveClips, getClipSourceTime, type TimelineAsset, type TimelineClip, type TimelineTrack } from '../services/timeline';
+import { shouldSeekPreviewVideo } from '../services/videoPreview';
+import { getActiveTitles, mapTitleToOutput, type TitleOverlay } from '../services/titleOverlay';
 
 type CompositionPreviewProps = {
   assets: TimelineAsset[];
+  tracks: TimelineTrack[];
   clips: TimelineClip[];
+  titles: TitleOverlay[];
   currentTime: number;
+  isPlaying: boolean;
   width: number;
   height: number;
-  videoRef: RefObject<HTMLVideoElement>;
 };
 
-export function CompositionPreview({ assets, clips, currentTime, width, height, videoRef }: CompositionPreviewProps) {
-  const active = useMemo(() => {
-    let offset = 0;
-    for (const clip of clips) {
-      const duration = getClipDuration(clip);
-      if (currentTime < offset + duration) {
-        return { clip, asset: assets.find((item) => item.id === clip.assetId), elapsed: currentTime - offset };
-      }
-      offset += duration;
-    }
-    const clip = clips[clips.length - 1];
-    return clip
-      ? { clip, asset: assets.find((item) => item.id === clip.assetId), elapsed: getClipDuration(clip) }
-      : null;
-  }, [assets, clips, currentTime]);
-
-  const clip = active?.clip;
-  const asset = active?.asset;
-  const transform = clip?.transform ?? defaultTransform;
+export function CompositionPreview({ assets, tracks, clips, titles, currentTime, isPlaying, width, height }: CompositionPreviewProps) {
+  const videoElements = useRef(new Map<string, HTMLVideoElement>());
+  const active = useMemo(() => getActiveClips(tracks, clips, currentTime)
+    .map(({ clip, elapsed }) => ({ clip, elapsed, asset: assets.find((item) => item.id === clip.assetId) }))
+    .filter((item) => item.asset), [assets, clips, currentTime, tracks]);
+  const activeTitles = useMemo(() => getActiveTitles(titles, currentTime), [titles, currentTime]);
 
   useEffect(() => {
-    const video = videoRef.current;
-    if (!video || !clip || asset?.kind !== 'video' || !active) return;
-    const targetTime = Math.min(clip.start + active.elapsed, clip.end);
-    if (Math.abs(video.currentTime - targetTime) > 0.4) video.currentTime = targetTime;
-  }, [active, asset?.kind, clip, videoRef]);
+    for (const { clip, asset } of active) {
+      if (asset?.kind !== 'video') continue;
+      const video = videoElements.current.get(clip.id);
+      if (!video) continue;
+      const target = getClipSourceTime(clip, currentTime);
+      if (shouldSeekPreviewVideo(video.currentTime, target, !isPlaying)) {
+        try { video.currentTime = target; } catch { /* Metadata may not be ready until the browser's next media event. */ }
+      }
+      if (isPlaying) void video.play().catch(() => undefined);
+      else video.pause();
+    }
+    const activeIds = new Set(active.map(({ clip }) => clip.id));
+    videoElements.current.forEach((video, id) => {
+      if (!activeIds.has(id)) video.pause();
+    });
+  }, [active, isPlaying]);
 
   return (
     <div
@@ -44,42 +45,72 @@ export function CompositionPreview({ assets, clips, currentTime, width, height, 
       style={{ aspectRatio: `${width} / ${height}` }}
       aria-label="Video composition preview"
     >
-      {asset && clip ? (
-        asset.kind === 'image' ? (
+      {active.length ? active.map(({ clip, asset }, layerIndex) => {
+        if (!asset) return null;
+        const transform = clip.transform ?? defaultTransform;
+        const style = {
+          objectFit: transform.fit,
+          transform: `translate(${transform.x}%, ${transform.y}%) scale(${transform.zoom * (transform.flipX ? -1 : 1)}, ${transform.zoom * (transform.flipY ? -1 : 1)}) rotate(${transform.rotation}deg)`,
+          opacity: 1,
+          zIndex: layerIndex + 1,
+        } as const;
+        return asset.kind === 'image' ? (
           <img
+            key={clip.id}
             src={asset.url}
-            alt="Current visual clip"
-            className="h-full w-full"
-            style={{
-              objectFit: transform.fit,
-              transform: `translate(${transform.x}%, ${transform.y}%) scale(${transform.zoom * (transform.flipX ? -1 : 1)}, ${transform.zoom * (transform.flipY ? -1 : 1)}) rotate(${transform.rotation}deg)`,
-            }}
+            alt={`Visible visual layer ${layerIndex + 1}`}
+            className="absolute inset-0 h-full w-full"
+            style={style}
           />
         ) : (
           <video
-            key={asset.id}
+            key={clip.id}
             src={asset.url}
-            className="h-full w-full object-cover"
+            className="absolute inset-0 h-full w-full"
             muted
             playsInline
-            ref={videoRef}
-            style={{
-              objectFit: transform.fit,
-              transform: `translate(${transform.x}%, ${transform.y}%) scale(${transform.zoom * (transform.flipX ? -1 : 1)}, ${transform.zoom * (transform.flipY ? -1 : 1)}) rotate(${transform.rotation}deg)`,
+            preload="auto"
+            ref={(element) => {
+              if (element) videoElements.current.set(clip.id, element);
+              else videoElements.current.delete(clip.id);
             }}
             onLoadedMetadata={(event) => {
-              const element = event.currentTarget;
-              if (element && Number.isFinite(active.elapsed)) {
-                const targetTime = Math.min(clip.start + active.elapsed, clip.end);
-                if (Math.abs(element.currentTime - targetTime) > 0.35) element.currentTime = targetTime;
-              }
+              const target = getClipSourceTime(clip, currentTime);
+              try { event.currentTarget.currentTime = Math.min(target, event.currentTarget.duration || target); } catch { /* Retry through the preview effect when time changes. */ }
             }}
+            style={{ ...style, objectFit: style.objectFit }}
           />
-        )
-      ) : (
+        );
+      }) : !activeTitles.length ? (
         <div className="px-6 text-center text-sm text-neutral-500">Add clips to see your composition</div>
-      )}
-      <span className="pointer-events-none absolute bottom-3 right-3 rounded-sm bg-black/55 px-2 py-1 text-[11px] text-white">
+      ) : null}
+      <div className="pointer-events-none absolute inset-0 z-[1000000] overflow-hidden" style={{ containerType: 'size' }}>
+        {activeTitles.map((title) => {
+          const mapped = mapTitleToOutput(title, width, height);
+          return (
+            <div
+              key={title.id}
+              className="absolute max-w-[90%] whitespace-pre-wrap break-words px-[0.3em] py-[0.15em]"
+              style={{
+                left: `${(mapped.x / width) * 100}%`,
+                top: `${(mapped.y / height) * 100}%`,
+                transform: 'translate(-50%, -50%)',
+                fontFamily: mapped.fontFamily,
+                fontSize: `${(mapped.fontSize / height) * 100}cqh`,
+                fontWeight: title.fontWeight,
+                lineHeight: 1.15,
+                textAlign: title.align,
+                color: title.color,
+                backgroundColor: title.background ?? 'transparent',
+                textShadow: title.shadow ? '0 2px 6px rgba(0,0,0,.8)' : 'none',
+              }}
+            >
+              {title.text}
+            </div>
+          );
+        })}
+      </div>
+      <span className="pointer-events-none absolute bottom-3 right-3 z-[1000] rounded-sm bg-black/55 px-2 py-1 text-[11px] text-white">
         {width} × {height}
       </span>
     </div>

@@ -3,21 +3,48 @@ import { AudioUploader } from './components/AudioUploader';
 import { CompositionPreview } from './components/CompositionPreview';
 import { ExportProgress } from './components/ExportProgress';
 import { TimelineEditor } from './components/TimelineEditor';
+import { TitleOverlayEditor } from './components/TitleOverlayEditor';
 import { buildOutputFileName, formatDuration, formatFileSize } from './services/media';
+import { projectStorage, type ProjectSummary, type StoredProject } from './services/projectStorage';
+import type { ProjectDocument } from './services/project';
+import { MediaUrlRegistry } from './services/mediaUrlRegistry';
+import { createHistory, type History } from './services/history';
 import { getSupportedMimeType, renderVideo } from './services/videoExport';
+import { createDefaultTitle, type TitleOverlay } from './services/titleOverlay';
 import {
+  clampTimelineTime,
   defaultTransform,
   getClipDuration,
   getTimelineDuration,
-  moveClip,
+  defaultVideoTrack,
+  duplicateTimelineClip,
   platformPresets,
-  splitClip,
+  snapTimelinePosition,
+  splitClipAtTimelineTime,
+  type TimelineTrack,
   type TimelineAsset,
   type TimelineClip,
   type VisualTransform,
 } from './services/timeline';
 
 const steps = ['Audio', 'Visuals', 'Edit & export'];
+const HISTORY_LIMIT = 50;
+
+type EditSnapshot = {
+  audioFile: File | null;
+  audioDuration: number;
+  assets: Array<Pick<TimelineAsset, 'id' | 'file' | 'kind' | 'duration'>>;
+  tracks: TimelineTrack[];
+  clips: TimelineClip[];
+  titles: TitleOverlay[];
+  outputSettings: {
+    presetId: string;
+    customWidth: number;
+    customHeight: number;
+    frameRate: number;
+    format: string;
+  };
+};
 
 function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
@@ -25,12 +52,22 @@ function newId() {
 
 function App() {
   const [step, setStep] = useState(1);
+  const [projectId, setProjectId] = useState<string>(() => newId());
+  const [projectName, setProjectName] = useState('Untitled project');
+  const [projectCreatedAt, setProjectCreatedAt] = useState(() => new Date().toISOString());
+  const [projectList, setProjectList] = useState<ProjectSummary[]>([]);
+  const [projectToOpen, setProjectToOpen] = useState('');
+  const [projectStorageStatus, setProjectStorageStatus] = useState('Checking local project storage…');
+  const [isProjectStorageReady, setIsProjectStorageReady] = useState(false);
   const [audioFile, setAudioFile] = useState<File | null>(null);
   const [audioUrl, setAudioUrl] = useState<string | null>(null);
   const [audioDuration, setAudioDuration] = useState(0);
   const [assets, setAssets] = useState<TimelineAsset[]>([]);
   const [clips, setClips] = useState<TimelineClip[]>([]);
+  const [tracks, setTracks] = useState<TimelineTrack[]>([defaultVideoTrack()]);
+  const [titles, setTitles] = useState<TitleOverlay[]>([]);
   const [selectedClipId, setSelectedClipId] = useState('');
+  const [selectedTitleId, setSelectedTitleId] = useState('');
   const [currentTime, setCurrentTime] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [presetId, setPresetId] = useState('youtube');
@@ -38,17 +75,97 @@ function App() {
   const [customHeight, setCustomHeight] = useState(1080);
   const [frameRate, setFrameRate] = useState(30);
   const [format, setFormat] = useState('MP4');
+  const [canUndo, setCanUndo] = useState(false);
+  const [canRedo, setCanRedo] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportComplete, setExportComplete] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const mainRef = useRef<HTMLElement | null>(null);
-  const previewVideoRef = useRef<HTMLVideoElement | null>(null);
   const exportButtonRef = useRef<HTMLButtonElement | null>(null);
   const wasExportingRef = useRef(false);
-  const urlsRef = useRef<string[]>([]);
+  const urlsRef = useRef(new MediaUrlRegistry());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const startupRef = useRef(false);
+  const historyRef = useRef<History<EditSnapshot> | null>(null);
+
+  const makeEditSnapshot = (overrides: Partial<EditSnapshot> = {}): EditSnapshot => ({
+    audioFile,
+    audioDuration,
+    assets: assets.map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
+    tracks,
+    clips,
+    titles,
+    outputSettings: { presetId, customWidth, customHeight, frameRate, format },
+    ...overrides,
+  });
+
+  if (!historyRef.current) {
+    historyRef.current = createHistory(makeEditSnapshot(), { limit: HISTORY_LIMIT });
+  }
+
+  const syncHistoryButtons = () => {
+    setCanUndo(historyRef.current?.canUndo() ?? false);
+    setCanRedo(historyRef.current?.canRedo() ?? false);
+  };
+
+  const recordEdit = (snapshot: EditSnapshot) => {
+    historyRef.current?.push(snapshot);
+    syncHistoryButtons();
+  };
+
+  const resetEditHistory = (snapshot: EditSnapshot) => {
+    historyRef.current?.clear(snapshot);
+    syncHistoryButtons();
+  };
+
+  const applyEditSnapshot = (snapshot: EditSnapshot) => {
+    const newUrls: string[] = [];
+    const restoredAssets: TimelineAsset[] = snapshot.assets.map((asset) => {
+      const url = urlsRef.current.create(asset.file);
+      newUrls.push(url);
+      return { ...asset, url };
+    });
+    const restoredAudioUrl = snapshot.audioFile ? urlsRef.current.create(snapshot.audioFile) : null;
+    if (restoredAudioUrl) newUrls.push(restoredAudioUrl);
+
+    audioRef.current?.pause();
+    audioRef.current?.removeAttribute('src');
+    audioRef.current?.load();
+    urlsRef.current.replace(newUrls);
+
+    setAudioFile(snapshot.audioFile);
+    setAudioUrl(restoredAudioUrl);
+    setAudioDuration(snapshot.audioDuration);
+    setAssets(restoredAssets);
+    setTracks(snapshot.tracks);
+    setClips(snapshot.clips);
+    setSelectedTitleId((current) => snapshot.titles.some((title) => title.id === current)
+      ? current
+      : (snapshot.titles[0]?.id ?? ''));
+    setTitles(snapshot.titles);
+    setSelectedClipId((current) => snapshot.clips.some((clip) => clip.id === current)
+      ? current
+      : (snapshot.clips[0]?.id ?? ''));
+    setPresetId(snapshot.outputSettings.presetId);
+    setCustomWidth(snapshot.outputSettings.customWidth);
+    setCustomHeight(snapshot.outputSettings.customHeight);
+    setFrameRate(snapshot.outputSettings.frameRate);
+    setFormat(snapshot.outputSettings.format);
+  };
+
+  const undoEdit = () => {
+    if (!historyRef.current?.canUndo()) return;
+    applyEditSnapshot(historyRef.current.undo());
+    syncHistoryButtons();
+  };
+
+  const redoEdit = () => {
+    if (!historyRef.current?.canRedo()) return;
+    applyEditSnapshot(historyRef.current.redo());
+    syncHistoryButtons();
+  };
 
   const preset = platformPresets.find((item) => item.id === presetId) ?? platformPresets[0];
   const width = presetId === 'custom' ? customWidth : preset.width;
@@ -60,7 +177,7 @@ function App() {
     detectedType: audioFile?.type || 'audio',
   };
 
-  useEffect(() => () => urlsRef.current.forEach((url) => URL.revokeObjectURL(url)), []);
+  useEffect(() => () => urlsRef.current.clear(), []);
   useEffect(() => {
     mainRef.current?.toggleAttribute('inert', isExporting);
   }, [isExporting]);
@@ -77,20 +194,207 @@ function App() {
     });
     else audio.pause();
   }, [audioUrl, isPlaying]);
+  const revokeUrl = (url: string) => {
+    urlsRef.current.revoke(url);
+  };
+
+  const makeProjectDocument = (
+    id = projectId,
+    name = projectName,
+    createdAt = projectCreatedAt,
+  ): ProjectDocument => ({
+    id,
+    name: name.trim() || 'Untitled project',
+    createdAt,
+    updatedAt: new Date().toISOString(),
+    schemaVersion: 3,
+    audio: audioFile ? {
+      id: `${id}-audio`,
+      fileName: audioFile.name,
+      mimeType: audioFile.type,
+      size: audioFile.size,
+      duration: audioDuration,
+    } : null,
+    assets: assets.map((asset) => ({
+      id: asset.id,
+      fileName: asset.file.name,
+      mimeType: asset.file.type,
+      size: asset.file.size,
+      kind: asset.kind,
+      duration: asset.duration,
+    })),
+    tracks,
+    clips,
+    titleOverlays: titles,
+    outputSettings: {
+      presetId,
+      customWidth,
+      customHeight,
+      frameRate,
+      format: format === 'WebM' ? 'WebM' : 'MP4',
+    },
+  });
+
+  const makeProjectMedia = () => ({
+    audio: audioFile,
+    assets: Object.fromEntries(assets.map((asset) => [asset.id, asset.file])),
+  });
+
+  const refreshProjectList = async () => {
+    const projects = await projectStorage.listProjects();
+    setProjectList(projects);
+    setProjectToOpen((current) => current && projects.some((project) => project.id === current)
+      ? current
+      : (projects[0]?.id ?? ''));
+  };
+
+  const applyStoredProject = async (stored: StoredProject) => {
+    const createdUrls: string[] = [];
+    try {
+      const restoredAssets = await Promise.all(stored.document.assets.map(async (asset): Promise<TimelineAsset> => {
+        const blob = stored.media.assets[asset.id];
+        const file = new File([blob], asset.fileName, { type: asset.mimeType });
+        const url = urlsRef.current.create(file);
+        createdUrls.push(url);
+        if (asset.kind === 'image') {
+          const image = new Image();
+          image.src = url;
+          try {
+            await image.decode();
+          } catch {
+            throw new Error(`Could not read "${asset.fileName}". Re-import the original media file.`);
+          }
+        } else {
+          const video = document.createElement('video');
+          video.preload = 'metadata';
+          await new Promise<void>((resolve, reject) => {
+            video.onloadedmetadata = () => Number.isFinite(video.duration) && video.duration > 0
+              ? resolve()
+              : reject(new Error(`Could not read "${asset.fileName}". Re-import the original media file.`));
+            video.onerror = () => reject(new Error(`Could not read "${asset.fileName}". Re-import the original media file.`));
+            video.src = url;
+          });
+        }
+        return { id: asset.id, file, url, kind: asset.kind, duration: asset.duration };
+      }));
+
+      const audioFileToRestore = stored.document.audio && stored.media.audio
+        ? new File([stored.media.audio], stored.document.audio.fileName, { type: stored.document.audio.mimeType })
+        : null;
+      const restoredAudioUrl = audioFileToRestore ? urlsRef.current.create(audioFileToRestore) : null;
+      if (restoredAudioUrl) createdUrls.push(restoredAudioUrl);
+
+      audioRef.current?.pause();
+      audioRef.current?.removeAttribute('src');
+      audioRef.current?.load();
+      urlsRef.current.replace(createdUrls);
+
+      const documentValue = stored.document;
+      setProjectId(documentValue.id);
+      setProjectName(documentValue.name);
+      setProjectCreatedAt(documentValue.createdAt);
+      setAudioFile(audioFileToRestore);
+      setAudioUrl(restoredAudioUrl);
+      setAudioDuration(documentValue.audio?.duration ?? 0);
+      setAssets(restoredAssets);
+      setTracks(documentValue.tracks);
+      setClips(documentValue.clips);
+      setTitles(documentValue.titleOverlays);
+      setSelectedClipId(documentValue.clips[0]?.id ?? '');
+      setSelectedTitleId(documentValue.titleOverlays[0]?.id ?? '');
+      setStep(documentValue.audio ? (documentValue.clips.length ? 3 : 2) : 1);
+      setCurrentTime(0);
+      setIsPlaying(false);
+      setPresetId(documentValue.outputSettings.presetId);
+      setCustomWidth(documentValue.outputSettings.customWidth);
+      setCustomHeight(documentValue.outputSettings.customHeight);
+      setFrameRate(documentValue.outputSettings.frameRate);
+      setFormat(documentValue.outputSettings.format);
+      setExportComplete(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      resetEditHistory({
+        audioFile: audioFileToRestore,
+        audioDuration: documentValue.audio?.duration ?? 0,
+        assets: restoredAssets.map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
+        tracks: documentValue.tracks,
+        clips: documentValue.clips,
+        titles: documentValue.titleOverlays,
+        outputSettings: { ...documentValue.outputSettings },
+      });
+    } catch (error) {
+      createdUrls.forEach((url) => urlsRef.current.revoke(url));
+      throw error;
+    }
+  };
+
+  const saveCurrentProject = async (
+    id = projectId,
+    name = projectName,
+    createdAt = projectCreatedAt,
+  ) => {
+    await projectStorage.saveProject(makeProjectDocument(id, name, createdAt), makeProjectMedia());
+    await refreshProjectList();
+  };
+
   useEffect(() => {
-    const video = previewVideoRef.current;
-    if (!video) return;
-    if (isPlaying) void video.play().catch(() => undefined);
-    else video.pause();
-  }, [isPlaying, currentTime, selectedClipId]);
+    if (startupRef.current) return;
+    startupRef.current = true;
+    void (async () => {
+      try {
+        const projects = await projectStorage.listProjects();
+        const recoverable = projects.find((project) => !project.problem);
+        setProjectList(projects);
+        setProjectToOpen(recoverable?.id ?? projects[0]?.id ?? '');
+        setIsProjectStorageReady(true);
+        if (recoverable) {
+          const stored = await projectStorage.loadProject(recoverable.id);
+          await applyStoredProject(stored);
+          setProjectStorageStatus(projects.some((project) => project.problem)
+            ? `Recovered “${stored.document.name}”. Another saved project needs attention; select it to inspect or delete.`
+            : `Recovered “${stored.document.name}” from this browser.`);
+        } else if (projects.length) {
+          setProjectStorageStatus('Saved project records need attention. Select a record to open for details or delete it; your current project remains open.');
+        } else {
+          setProjectStorageStatus('Local project storage is ready. Edits will autosave in this browser.');
+        }
+      } catch (error) {
+        setIsProjectStorageReady(true);
+        setProjectStorageStatus(error instanceof Error ? error.message : 'Local project recovery failed. Your current project is still open.');
+      }
+    })();
+  }, []);
+
+  useEffect(() => {
+    if (!isProjectStorageReady || (!audioFile && !assets.length && !clips.length && !titles.length)) return;
+    const snapshot = makeProjectDocument();
+    const media = makeProjectMedia();
+    setProjectStorageStatus('Saving project locally…');
+    const timer = window.setTimeout(() => {
+      void projectStorage.saveProject(snapshot, media)
+        .then(refreshProjectList)
+        .then(() => setProjectStorageStatus(`Saved “${snapshot.name}” in this browser.`))
+        .catch((error: unknown) => setProjectStorageStatus(
+          error instanceof Error ? error.message : 'Could not autosave. Your current edits are still open; use Save to retry.',
+        ));
+    }, 850);
+    return () => window.clearTimeout(timer);
+  }, [
+    isProjectStorageReady, projectId, projectName, projectCreatedAt, audioFile, audioDuration,
+    assets, tracks, clips, titles, presetId, customWidth, customHeight, frameRate, format,
+  ]);
 
   const readAudioDuration = (file: File) => new Promise<number>((resolve) => {
-    const url = URL.createObjectURL(file);
-    urlsRef.current.push(url);
+    const url = urlsRef.current.create(file);
     const audio = new Audio();
     audio.preload = 'metadata';
-    audio.onloadedmetadata = () => resolve(Number.isFinite(audio.duration) ? audio.duration : 0);
-    audio.onerror = () => resolve(0);
+    const finish = (duration: number) => {
+      audio.onloadedmetadata = null;
+      audio.onerror = null;
+      revokeUrl(url);
+      resolve(duration);
+    };
+    audio.onloadedmetadata = () => finish(Number.isFinite(audio.duration) ? audio.duration : 0);
+    audio.onerror = () => finish(0);
     audio.src = url;
   });
 
@@ -100,23 +404,33 @@ function App() {
       return;
     }
     const duration = await readAudioDuration(file);
-    const url = URL.createObjectURL(file);
-    urlsRef.current.push(url);
+    if (audioUrl) {
+      audioRef.current?.pause();
+      audioRef.current?.removeAttribute('src');
+      audioRef.current?.load();
+      revokeUrl(audioUrl);
+    }
+    const url = urlsRef.current.create(file);
     setAudioFile(file);
     setAudioUrl(url);
     setAudioDuration(duration);
+    recordEdit(makeEditSnapshot({ audioFile: file, audioDuration: duration }));
     setCurrentTime(0);
     setStatusMessage(duration > 0 ? `Loaded ${file.name}` : 'Audio loaded, but its duration could not be read.');
   };
 
   const handleAddVisuals = async (fileList: FileList | null) => {
+    if (!tracks.some((track) => !track.locked)) {
+      setStatusMessage('Unlock a video track before adding visual clips.');
+      if (fileInputRef.current) fileInputRef.current.value = '';
+      return;
+    }
     const files = Array.from(fileList ?? []).filter((file) => file.size > 0);
     const newAssets = await Promise.all(files.map(async (file): Promise<TimelineAsset | null> => {
       const extension = file.name.split('.').pop()?.toLowerCase();
       const isVideo = file.type.startsWith('video/') || ['mp4', 'mov', 'webm', 'm4v'].includes(extension ?? '');
       const kind = isVideo ? 'video' : 'image';
-      const url = URL.createObjectURL(file);
-      urlsRef.current.push(url);
+      const url = urlsRef.current.create(file);
       const duration = kind === 'image' ? 5 : await new Promise<number>((resolve) => {
         const video = document.createElement('video');
         video.preload = 'metadata';
@@ -128,77 +442,228 @@ function App() {
         const image = new Image();
         image.src = url;
         try { await image.decode(); } catch {
-          URL.revokeObjectURL(url);
-          urlsRef.current = urlsRef.current.filter((item) => item !== url);
+          revokeUrl(url);
           return null;
         }
       }
       if (kind === 'video' && duration <= 0) {
-        URL.revokeObjectURL(url);
-        urlsRef.current = urlsRef.current.filter((item) => item !== url);
+        revokeUrl(url);
         return null;
       }
       return { id: newId(), file, url, kind, duration };
     }));
     const validAssets = newAssets.filter((asset): asset is TimelineAsset => Boolean(asset));
-    const newClips = validAssets.map((asset): TimelineClip => ({
-      id: newId(),
-      assetId: asset.id,
-      start: 0,
-      end: asset.kind === 'video' ? asset.duration : 0,
-      stillDuration: 5,
-      transition: 'none',
-      transform: { ...defaultTransform },
-    }));
+    let appendAt = getTimelineDuration(clips);
+    const appendTrackId = tracks.find((track) => !track.locked)!.id;
+    const newClips = validAssets.map((asset): TimelineClip => {
+      const clip: TimelineClip = {
+        id: newId(),
+        assetId: asset.id,
+        trackId: appendTrackId,
+        timelinePosition: appendAt,
+        start: 0,
+        end: asset.kind === 'video' ? asset.duration : 0,
+        stillDuration: 5,
+        transition: 'none',
+        transform: { ...defaultTransform },
+      };
+      appendAt += getClipDuration(clip);
+      return clip;
+    });
     setAssets((current) => [...current, ...validAssets]);
     setClips((current) => [...current, ...newClips]);
+    if (newClips.length) {
+      recordEdit(makeEditSnapshot({
+        assets: [...assets, ...validAssets].map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
+        tracks,
+        clips: [...clips, ...newClips],
+      }));
+    }
     if (newClips.length) setSelectedClipId(newClips[0].id);
     setStatusMessage(validAssets.length ? `Added ${validAssets.length} visual clip${validAssets.length === 1 ? '' : 's'}.` : 'No supported image or video files could be loaded.');
     if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const updateClip = (id: string, patch: Partial<TimelineClip>) => {
-    setClips((current) => current.map((clip) => clip.id === id ? { ...clip, ...patch } : clip));
+    const target = clips.find((clip) => clip.id === id);
+    if (!target || tracks.find((track) => track.id === target.trackId)?.locked) return;
+    const nextClips = clips.map((clip) => clip.id === id ? { ...clip, ...patch } : clip);
+    if (nextClips.every((clip, index) => clip === clips[index])) return;
+    setClips(nextClips);
+    recordEdit(makeEditSnapshot({ clips: nextClips }));
   };
   const updateTransform = (id: string, patch: Partial<VisualTransform>) => {
-    setClips((current) => current.map((clip) => clip.id === id ? { ...clip, transform: { ...clip.transform, ...patch } } : clip));
+    const target = clips.find((clip) => clip.id === id);
+    if (!target || tracks.find((track) => track.id === target.trackId)?.locked) return;
+    const nextClips = clips.map((clip) => clip.id === id
+      ? { ...clip, transform: { ...clip.transform, ...patch } }
+      : clip);
+    if (nextClips.every((clip, index) => clip === clips[index])) return;
+    setClips(nextClips);
+    recordEdit(makeEditSnapshot({ clips: nextClips }));
   };
   const removeClip = (id: string) => {
     const nextClips = clips.filter((clip) => clip.id !== id);
+    if (nextClips.length === clips.length) return;
     const removed = assets.find((asset) => asset.id === clips.find((clip) => clip.id === id)?.assetId);
+    const nextAssets = removed && !nextClips.some((clip) => clip.assetId === removed.id)
+      ? assets.filter((asset) => asset.id !== removed.id)
+      : assets;
     setClips(nextClips);
-    if (removed && !nextClips.some((clip) => clip.assetId === removed.id)) {
-      setAssets((current) => current.filter((asset) => asset.id !== removed.id));
-      URL.revokeObjectURL(removed.url);
-      urlsRef.current = urlsRef.current.filter((url) => url !== removed.url);
+    if (removed && nextAssets !== assets) {
+      setAssets(nextAssets);
+      revokeUrl(removed.url);
     }
+    recordEdit(makeEditSnapshot({
+      assets: nextAssets.map(({ id: assetId, file, kind, duration }) => ({ id: assetId, file, kind, duration })),
+      tracks,
+      clips: nextClips,
+    }));
     setSelectedClipId(nextClips[0]?.id ?? '');
+    setStatusMessage('Clip removed from this project. The original source file on your device was not deleted.');
   };
 
   const handleSplit = (id: string) => {
     const clip = clips.find((item) => item.id === id);
-    if (!clip || clip.end - clip.start < 0.2) return;
-    const next = splitClip(clips, id, clip.start + (clip.end - clip.start) / 2);
+    if (!clip || tracks.find((track) => track.id === clip.trackId)?.locked) return;
+    const next = splitClipAtTimelineTime(clips, id, currentTime);
     setClips(next);
+    if (next.length > clips.length) recordEdit(makeEditSnapshot({ clips: next, tracks }));
     if (next.length > clips.length) setSelectedClipId(next[next.findIndex((item) => item.id === id) + 1].id);
   };
 
-  const startNewVideo = () => {
+  const moveClipToTrack = (id: string, trackId: string, timelinePosition: number) => {
+    const clip = clips.find((item) => item.id === id);
+    const targetTrack = tracks.find((track) => track.id === trackId);
+    if (!clip || !targetTrack || targetTrack.locked || tracks.find((track) => track.id === clip.trackId)?.locked) return;
+    const position = snapTimelinePosition(timelinePosition, false);
+    const nextClips = clips.map((item) => item.id === id ? { ...item, trackId, timelinePosition: position } : item);
+    if (nextClips.every((item, index) => item === clips[index])) return;
+    setClips(nextClips);
+    recordEdit(makeEditSnapshot({ clips: nextClips, tracks }));
+  };
+
+  const duplicateClip = (id: string) => {
+    const source = clips.find((clip) => clip.id === id);
+    if (!source || tracks.find((track) => track.id === source.trackId)?.locked) return;
+    const nextClips = duplicateTimelineClip(clips, id);
+    if (nextClips.length === clips.length) return;
+    setClips(nextClips);
+    recordEdit(makeEditSnapshot({ clips: nextClips, tracks }));
+    setSelectedClipId(nextClips[clips.indexOf(source) + 1]?.id ?? id);
+  };
+
+  const addTrack = () => {
+    const order = Math.max(-1, ...tracks.map((track) => track.order)) + 1;
+    const track: TimelineTrack = { id: newId(), name: `Video ${tracks.length + 1}`, order, visible: true, locked: false };
+    const nextTracks = [...tracks, track];
+    setTracks(nextTracks);
+    recordEdit(makeEditSnapshot({ tracks: nextTracks, clips }));
+  };
+  const updateTrack = (id: string, patch: Partial<Pick<TimelineTrack, 'name' | 'visible' | 'locked'>>) => {
+    const nextTracks = tracks.map((track) => track.id === id ? { ...track, ...patch } : track);
+    if (nextTracks.every((track, index) => track === tracks[index])) return;
+    setTracks(nextTracks);
+    recordEdit(makeEditSnapshot({ tracks: nextTracks, clips }));
+  };
+
+  const updateOutputSettings = (patch: Partial<EditSnapshot['outputSettings']>) => {
+    const outputSettings = {
+      presetId,
+      customWidth,
+      customHeight,
+      frameRate,
+      format,
+      ...patch,
+    };
+
+    if (
+      outputSettings.presetId === presetId
+      && outputSettings.customWidth === customWidth
+      && outputSettings.customHeight === customHeight
+      && outputSettings.frameRate === frameRate
+      && outputSettings.format === format
+    ) return;
+    setPresetId(outputSettings.presetId);
+    setCustomWidth(outputSettings.customWidth);
+    setCustomHeight(outputSettings.customHeight);
+    setFrameRate(outputSettings.frameRate);
+    setFormat(outputSettings.format);
+    recordEdit(makeEditSnapshot({ outputSettings }));
+  };
+
+  const addTitle = () => {
+    const title = createDefaultTitle(newId(), currentTime);
+    const nextTitles = [...titles, title];
+    setTitles(nextTitles);
+    setSelectedTitleId(title.id);
+    recordEdit(makeEditSnapshot({ titles: nextTitles }));
+  };
+
+  const updateTitle = (id: string, patch: Partial<TitleOverlay>) => {
+    const nextTitles = titles.map((title) => {
+      if (title.id !== id) return title;
+      const updated = { ...title, ...patch };
+      updated.start = Math.max(0, Math.min(86_400 - updated.duration, updated.start));
+      updated.duration = Math.max(0.1, Math.min(86_400 - updated.start, updated.duration));
+      updated.x = Math.max(0, Math.min(100, updated.x));
+      updated.y = Math.max(0, Math.min(100, updated.y));
+      updated.fontSize = Math.max(2, Math.min(20, updated.fontSize));
+      return updated;
+    });
+    if (nextTitles.every((title, index) => title === titles[index])) return;
+    setTitles(nextTitles);
+    recordEdit(makeEditSnapshot({ titles: nextTitles }));
+  };
+
+  const removeTitle = (id: string) => {
+    const nextTitles = titles.filter((title) => title.id !== id);
+    if (nextTitles.length === titles.length) return;
+    setTitles(nextTitles);
+    if (selectedTitleId === id) setSelectedTitleId(nextTitles[0]?.id ?? '');
+    recordEdit(makeEditSnapshot({ titles: nextTitles }));
+  };
+
+  useEffect(() => {
+    const handleHistoryShortcut = (event: KeyboardEvent) => {
+      if (isExporting || (!event.ctrlKey && !event.metaKey) || event.altKey) return;
+      const target = event.target;
+      if (target instanceof HTMLElement
+        && (target.matches('input, textarea, select') || target.isContentEditable)) return;
+
+      const key = event.key.toLowerCase();
+      const isUndo = key === 'z' && !event.shiftKey;
+      const isRedo = (key === 'z' && event.shiftKey) || (key === 'y' && !event.shiftKey);
+      if (isUndo && historyRef.current?.canUndo()) {
+        event.preventDefault();
+        undoEdit();
+      } else if (isRedo && historyRef.current?.canRedo()) {
+        event.preventDefault();
+        redoEdit();
+      }
+    };
+    window.addEventListener('keydown', handleHistoryShortcut);
+    return () => window.removeEventListener('keydown', handleHistoryShortcut);
+  }, [isExporting]);
+
+  const resetProjectState = () => {
     audioRef.current?.pause();
     audioRef.current?.removeAttribute('src');
     audioRef.current?.load();
-    previewVideoRef.current?.pause();
-    previewVideoRef.current?.removeAttribute('src');
-    previewVideoRef.current?.load();
-    urlsRef.current.forEach((url) => URL.revokeObjectURL(url));
-    urlsRef.current = [];
+    urlsRef.current.clear();
+    setProjectId(newId());
+    setProjectName('Untitled project');
+    setProjectCreatedAt(new Date().toISOString());
     setStep(1);
     setAudioFile(null);
     setAudioUrl(null);
     setAudioDuration(0);
     setAssets([]);
+    setTracks([defaultVideoTrack()]);
     setClips([]);
+    setTitles([]);
     setSelectedClipId('');
+    setSelectedTitleId('');
     setCurrentTime(0);
     setIsPlaying(false);
     setPresetId('youtube');
@@ -206,10 +671,85 @@ function App() {
     setCustomHeight(1080);
     setFrameRate(30);
     setFormat('MP4');
+    resetEditHistory({
+      audioFile: null,
+      audioDuration: 0,
+      assets: [],
+      tracks: [defaultVideoTrack()],
+      clips: [],
+      titles: [],
+      outputSettings: { presetId: 'youtube', customWidth: 1920, customHeight: 1080, frameRate: 30, format: 'MP4' },
+    });
     setStatusMessage('');
     setExportProgress(0);
     setExportComplete(false);
     if (fileInputRef.current) fileInputRef.current.value = '';
+  };
+
+  const startNewVideo = async () => {
+    try {
+      if (audioFile || assets.length || clips.length) await saveCurrentProject();
+      resetProjectState();
+      setProjectStorageStatus('New project. It will autosave here after you add media.');
+    } catch (error) {
+      setProjectStorageStatus(error instanceof Error ? error.message : 'Could not save this project. Your current edits are still open.');
+    }
+  };
+
+  const handleSaveProject = async () => {
+    try {
+      await saveCurrentProject();
+      setProjectStorageStatus(`Saved “${projectName.trim() || 'Untitled project'}” in this browser.`);
+    } catch (error) {
+      setProjectStorageStatus(error instanceof Error ? error.message : 'Could not save. Your current edits are still open; retry when storage is available.');
+    }
+  };
+
+  const handleSaveAs = async () => {
+    const name = projectName.trim();
+    if (!name) {
+      setProjectStorageStatus('Enter a project name before using Save as.');
+      return;
+    }
+    const id = newId();
+    const createdAt = new Date().toISOString();
+    try {
+      await projectStorage.saveProject(makeProjectDocument(id, name, createdAt), makeProjectMedia());
+      setProjectId(id);
+      setProjectName(name);
+      setProjectCreatedAt(createdAt);
+      resetEditHistory(makeEditSnapshot());
+      await refreshProjectList();
+      setProjectStorageStatus(`Saved a separate copy named “${name}”.`);
+    } catch (error) {
+      setProjectStorageStatus(error instanceof Error ? error.message : 'Could not save a copy. Your current edits are still open.');
+    }
+  };
+
+  const handleOpenProject = async () => {
+    if (!projectToOpen) return;
+    try {
+      if (audioFile || assets.length || clips.length) await saveCurrentProject();
+      const stored = await projectStorage.loadProject(projectToOpen);
+      await applyStoredProject(stored);
+      setProjectStorageStatus(`Opened “${stored.document.name}”.`);
+    } catch (error) {
+      setProjectStorageStatus(error instanceof Error ? error.message : 'Could not open this project. Your current edits are still open.');
+    }
+  };
+
+  const handleDeleteProject = async () => {
+    const target = projectList.find((project) => project.id === projectToOpen);
+    if (!target) return;
+    if (!window.confirm(`Delete the saved project “${target.name}” and its browser-stored media? Original files on your device will not be deleted.`)) return;
+    try {
+      await projectStorage.deleteProject(target.id);
+      if (target.id === projectId) resetProjectState();
+      await refreshProjectList();
+      setProjectStorageStatus(`Deleted saved project “${target.name}”. Source files on your device were not deleted.`);
+    } catch (error) {
+      setProjectStorageStatus(error instanceof Error ? error.message : 'Could not delete the saved project. Your current edits are still open.');
+    }
   };
 
   const handleExport = async () => {
@@ -231,7 +771,9 @@ function App() {
       const blob = await renderVideo({
         audioFile,
         assets,
+        tracks,
         clips,
+        titles,
         width,
         height,
         frameRate,
@@ -275,6 +817,46 @@ function App() {
         </a>
         <span className="text-xs text-neutral-500">SOCIAL VIDEO STUDIO</span>
       </header>
+      <section aria-label="Project management" className="mx-auto grid max-w-[1500px] gap-3 border-b border-neutral-200 bg-white/60 px-5 py-4 md:grid-cols-[minmax(180px,1fr)_minmax(180px,1fr)_auto] md:items-end md:px-10">
+        <label className="block text-xs font-medium text-neutral-600">
+          Project name
+          <input
+            className="mt-1 w-full border border-neutral-200 bg-white px-3 py-2 text-sm text-ink"
+            aria-label="Project name"
+            maxLength={100}
+            value={projectName}
+            onChange={(event) => setProjectName(event.target.value)}
+            disabled={isExporting}
+          />
+        </label>
+        <label className="block text-xs font-medium text-neutral-600">
+          Saved projects
+          <select
+            className="mt-1 w-full border border-neutral-200 bg-white px-3 py-2 text-sm text-ink"
+            aria-label="Saved projects"
+            value={projectToOpen}
+            onChange={(event) => setProjectToOpen(event.target.value)}
+            disabled={!projectList.length || isExporting}
+          >
+            {!projectList.length && <option value="">No saved projects yet</option>}
+            {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}{project.problem ? ' · needs attention' : ''}</option>)}
+          </select>
+        </label>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={() => void handleSaveProject()} disabled={isExporting || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save</button>
+          <button type="button" onClick={() => void handleSaveAs()} disabled={isExporting || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save as</button>
+          <button type="button" onClick={() => void startNewVideo()} disabled={isExporting || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">New</button>
+          <button type="button" onClick={() => void handleOpenProject()} disabled={!projectToOpen || isExporting} className="bg-moss px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">Open</button>
+          <button type="button" onClick={() => void handleDeleteProject()} disabled={!projectToOpen || isExporting} className="border border-red-200 px-3 py-2 text-xs font-semibold text-red-800 disabled:opacity-40">Delete</button>
+          <button type="button" onClick={undoEdit} disabled={!canUndo || isExporting} aria-label="Undo last edit" aria-keyshortcuts="Control+Z Meta+Z" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Undo</button>
+          <button type="button" onClick={redoEdit} disabled={!canRedo || isExporting} aria-label="Redo last edit" aria-keyshortcuts="Control+Shift+Z Meta+Shift+Z Control+Y Meta+Y" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Redo</button>
+        </div>
+        <div className="md:col-span-3">
+          <p role="status" aria-live="polite" className="text-xs text-neutral-600">{projectStorageStatus}</p>
+          <p className="mt-1 text-[11px] text-neutral-500">Projects and source media stay in this browser only. Browser storage can be limited or evicted; there is no cloud sync. Keep your original files backed up.</p>
+          <p className="mt-1 text-[11px] text-neutral-500">Undo: Ctrl/⌘+Z · Redo: Ctrl/⌘+Shift+Z or Ctrl/⌘+Y. Editing shortcuts are inactive in text fields.</p>
+        </div>
+      </section>
       <main ref={mainRef} className="mx-auto max-w-[1500px] px-5 pb-12 pt-6 md:px-10 md:pt-10">
         <div className="mb-8 flex flex-wrap items-end justify-between gap-5">
           <div>
@@ -308,7 +890,7 @@ function App() {
 
         {step === 2 && <section className="mx-auto max-w-3xl border-t border-neutral-200 py-8">
           <div className="mb-8 flex items-end justify-between gap-4">
-            <div><h2 className="text-xl font-semibold">Build your visual sequence</h2><p className="mt-2 text-sm text-neutral-500">Add images and video clips. Video source audio is automatically excluded.</p></div>
+            <div><h2 className="text-xl font-semibold">Add visual media</h2><p className="mt-2 text-sm text-neutral-500">Add images and video clips. Video source audio is automatically excluded.</p></div>
             <button type="button" onClick={() => fileInputRef.current?.click()} className="shrink-0 bg-moss px-4 py-3 text-sm font-semibold text-white">+ Add media</button>
           </div>
           <input ref={fileInputRef} className="sr-only" type="file" multiple accept="image/*,video/mp4,video/quicktime,video/webm" onChange={(event) => void handleAddVisuals(event.target.files)} />
@@ -316,13 +898,11 @@ function App() {
             Drop image or video files here, or choose Add media above.
           </div>
           <div className="mt-6 divide-y divide-neutral-200 border-y border-neutral-200">
-            {clips.map((clip, index) => {
+            {clips.map((clip) => {
               const asset = assets.find((item) => item.id === clip.assetId);
               return <div key={clip.id} className="flex items-center gap-3 py-3">
                 {asset?.kind === 'image' ? <img src={asset.url} className="h-14 w-20 object-cover" alt="" /> : <video src={asset?.url} muted className="h-14 w-20 object-cover" />}
                 <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{asset?.file.name}</p><p className="mt-1 text-xs text-neutral-500">{asset?.kind === 'image' ? 'Still image' : 'Video clip'} · {getClipDuration(clip).toFixed(1)} sec</p></div>
-                <button type="button" title="Move clip up" aria-label="Move clip up" disabled={index === 0} onClick={() => setClips((current) => moveClip(current, index, index - 1))} className="px-2 py-2 text-neutral-600 disabled:opacity-30">↑</button>
-                <button type="button" title="Move clip down" aria-label="Move clip down" disabled={index === clips.length - 1} onClick={() => setClips((current) => moveClip(current, index, index + 1))} className="px-2 py-2 text-neutral-600 disabled:opacity-30">↓</button>
                 <button type="button" title="Remove clip" aria-label="Remove clip" onClick={() => removeClip(clip.id)} className="px-2 py-2 text-neutral-500">×</button>
               </div>;
             })}
@@ -335,34 +915,63 @@ function App() {
         {step === 3 && <section className="space-y-7 border-t border-neutral-200 pt-6">
           <div className="flex flex-wrap items-center justify-between gap-4">
             <div><h2 className="text-xl font-semibold">Preview and edit</h2><p className="mt-1 text-sm text-neutral-500">{audioFile?.name} · {formatDuration(audioDuration)} soundtrack</p></div>
-            <div className="flex items-center gap-2 text-xs text-neutral-500"><span className="h-2 w-2 rounded-full bg-lime-500" />Autosaved in this session</div>
+            <div className="flex items-center gap-2 text-xs text-neutral-500"><span className="h-2 w-2 rounded-full bg-lime-500" />{projectStorageStatus.startsWith('Saved') ? 'Autosaved locally' : 'Local autosave enabled'}</div>
           </div>
           <div className="grid items-start gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(390px,0.9fr)]">
             <div className="space-y-4">
-              <CompositionPreview assets={assets} clips={clips} currentTime={currentTime} width={width} height={height} videoRef={previewVideoRef} />
+              <CompositionPreview assets={assets} tracks={tracks} clips={clips} titles={titles} currentTime={currentTime} isPlaying={isPlaying} width={width} height={height} />
               <div className="flex items-center gap-4 border-b border-neutral-200 pb-4">
                 <button type="button" onClick={playPause} className="grid h-10 w-10 shrink-0 place-items-center bg-ink text-white" aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>{isPlaying ? 'Ⅱ' : '▶'}</button>
-                <div className="min-w-0 flex-1"><input aria-label="Preview position" type="range" min="0" max={audioDuration || 1} step="0.1" value={Math.min(currentTime, audioDuration || 0)} onChange={(event) => { const time = Number(event.target.value); setCurrentTime(time); if (audioRef.current) audioRef.current.currentTime = time; }} className="w-full accent-moss" /><div className="flex justify-between text-[11px] tabular-nums text-neutral-500"><span>{formatDuration(currentTime)}</span><span>{formatDuration(audioDuration)}</span></div></div>
+                <div className="min-w-0 flex-1"><input aria-label="Preview position" type="range" min="0" max={Math.max(audioDuration, 0.1)} step="0.1" value={clampTimelineTime(currentTime, audioDuration)} onChange={(event) => { const time = clampTimelineTime(Number(event.target.value), audioDuration); setCurrentTime(time); if (audioRef.current) audioRef.current.currentTime = time; }} className="w-full accent-moss" /><div className="flex justify-between text-[11px] tabular-nums text-neutral-500"><span>{formatDuration(clampTimelineTime(currentTime, audioDuration))}</span><span>{formatDuration(audioDuration)}</span></div></div>
               </div>
             </div>
             <aside className="space-y-5">
               <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
                 <label className="text-xs font-semibold text-neutral-600">Platform and placement
-                  <select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={presetId} onChange={(event) => setPresetId(event.target.value)}>
+                  <select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={presetId} onChange={(event) => updateOutputSettings({ presetId: event.target.value })}>
                     {platformPresets.map((item) => <option key={item.id} value={item.id}>{item.platform} · {item.placement} ({item.width} × {item.height})</option>)}
                   </select>
                 </label>
                 {presetId === 'custom' && <div className="grid grid-cols-2 gap-3">
-                  <label className="text-xs font-semibold text-neutral-600">Width<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customWidth} onChange={(event) => setCustomWidth(Math.max(144, Number(event.target.value)))} /></label>
-                  <label className="text-xs font-semibold text-neutral-600">Height<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customHeight} onChange={(event) => setCustomHeight(Math.max(144, Number(event.target.value)))} /></label>
+                  <label className="text-xs font-semibold text-neutral-600">Width<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customWidth} onChange={(event) => updateOutputSettings({ customWidth: Math.max(144, Number(event.target.value)) })} /></label>
+                  <label className="text-xs font-semibold text-neutral-600">Height<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customHeight} onChange={(event) => updateOutputSettings({ customHeight: Math.max(144, Number(event.target.value)) })} /></label>
                 </div>}
               </div>
               <div className="grid grid-cols-2 gap-3">
-                <label className="text-xs font-semibold text-neutral-600">File format<select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={format} onChange={(event) => setFormat(event.target.value)}><option>MP4</option><option>WebM</option></select></label>
-                <label className="text-xs font-semibold text-neutral-600">Frame rate<select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={frameRate} onChange={(event) => setFrameRate(Number(event.target.value))}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
+                <label className="text-xs font-semibold text-neutral-600">File format<select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={format} onChange={(event) => updateOutputSettings({ format: event.target.value })}><option>MP4</option><option>WebM</option></select></label>
+                <label className="text-xs font-semibold text-neutral-600">Frame rate<select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={frameRate} onChange={(event) => updateOutputSettings({ frameRate: Number(event.target.value) })}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
               </div>
               <div className="border-t border-neutral-200 pt-4"><div className="flex justify-between text-xs text-neutral-500"><span>Canvas</span><span className="font-medium text-ink">{width} × {height}</span></div><div className="mt-2 flex justify-between text-xs text-neutral-500"><span>Sequence</span><span className="font-medium text-ink">{formatDuration(Math.min(audioDuration, timelineDuration))} of {formatDuration(audioDuration)}</span></div><p className="mt-3 text-[11px] leading-relaxed text-neutral-500">Platform dimensions are starting presets. Check current platform requirements before publishing.</p></div>
-              <TimelineEditor assets={assets} clips={clips} selectedClipId={selectedClipId} onSelect={setSelectedClipId} onChange={updateClip} onTransform={updateTransform} onMove={(from, to) => setClips((current) => moveClip(current, from, to))} onRemove={removeClip} onSplit={handleSplit} />
+              <TimelineEditor
+                assets={assets}
+                tracks={tracks}
+                clips={clips}
+                titles={titles}
+                selectedTitleId={selectedTitleId}
+                selectedClipId={selectedClipId}
+                currentTime={currentTime}
+                soundtrackDuration={audioDuration}
+                onSeek={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
+                onAddTrack={addTrack}
+                onTrackChange={updateTrack}
+                onMoveClip={moveClipToTrack}
+                onSelect={setSelectedClipId}
+                onChange={updateClip}
+                onTransform={updateTransform}
+                onRemove={removeClip}
+                onSplit={handleSplit}
+                onDuplicate={duplicateClip}
+                onSelectTitle={setSelectedTitleId}
+                onSeekTitle={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
+              />
+              <TitleOverlayEditor
+                titles={titles}
+                selectedTitleId={selectedTitleId}
+                onAdd={addTitle}
+                onSelect={setSelectedTitleId}
+                onChange={updateTitle}
+                onRemove={removeTitle}
+              />
             </aside>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-4 border-t border-neutral-200 pt-5">
@@ -377,7 +986,7 @@ function App() {
             </div>
           </div>
         </section>}
-        <audio className="sr-only" ref={audioRef} src={audioUrl ?? undefined} onTimeUpdate={(event) => setCurrentTime(event.currentTarget.currentTime)} onEnded={() => setIsPlaying(false)} />
+        <audio className="sr-only" ref={audioRef} src={audioUrl ?? undefined} onTimeUpdate={(event) => setCurrentTime(clampTimelineTime(event.currentTarget.currentTime, audioDuration))} onEnded={() => { setCurrentTime(audioDuration); setIsPlaying(false); }} />
       </main>
       {isExporting && <ExportProgress progress={exportProgress} isExporting statusMessage={statusMessage} />}
     </div>

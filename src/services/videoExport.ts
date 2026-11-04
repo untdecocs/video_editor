@@ -1,10 +1,13 @@
-import type { TimelineAsset, TimelineClip } from './timeline';
-import { getClipDuration } from './timeline';
+import type { TimelineAsset, TimelineClip, TimelineTrack } from './timeline';
+import { getActiveClips, getClipDuration, getClipSourceTime, getPreviousClipOnTrack } from './timeline';
+import { getActiveTitles, mapTitleToOutput, type TitleOverlay } from './titleOverlay';
 
 type ExportOptions = {
   audioFile: File;
   assets: TimelineAsset[];
+  tracks: TimelineTrack[];
   clips: TimelineClip[];
+  titles: TitleOverlay[];
   width: number;
   height: number;
   frameRate: number;
@@ -14,25 +17,12 @@ type ExportOptions = {
 
 type VisualElement = HTMLImageElement | HTMLVideoElement;
 
-type LocatedClip = { clip: TimelineClip; elapsed: number; offset: number };
-
 export function getSupportedMimeType(format: string): string | null {
   if (typeof MediaRecorder === 'undefined') return null;
   const candidates = format === 'MP4'
     ? ['video/mp4;codecs=avc1.42E01E,mp4a.40.2', 'video/mp4']
     : ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'];
   return candidates.find((mimeType) => MediaRecorder.isTypeSupported(mimeType)) ?? null;
-}
-
-function locateClip(clips: TimelineClip[], time: number): LocatedClip | null {
-  let offset = 0;
-  for (const clip of clips) {
-    const duration = getClipDuration(clip);
-    if (time < offset + duration) return { clip, elapsed: time - offset, offset };
-    offset += duration;
-  }
-  const clip = clips[clips.length - 1];
-  return clip ? { clip, elapsed: getClipDuration(clip), offset: Math.max(0, offset - getClipDuration(clip)) } : null;
 }
 
 function drawVisual(
@@ -75,10 +65,66 @@ function seekVideo(video: HTMLVideoElement, time: number) {
   }
 }
 
+function drawTitle(context: CanvasRenderingContext2D, title: TitleOverlay, width: number, height: number) {
+  const mapped = mapTitleToOutput(title, width, height);
+  const fontSize = mapped.fontSize;
+  const lineHeight = fontSize * 1.15;
+  const maxLineWidth = width * 0.9;
+  context.save();
+  context.font = `${title.fontWeight} ${fontSize}px ${mapped.fontFamily}`;
+  context.textAlign = title.align;
+  context.textBaseline = 'middle';
+
+  const lines: string[] = [];
+  for (const paragraph of title.text.split('\n')) {
+    if (!paragraph) {
+      lines.push('');
+      continue;
+    }
+    let line = '';
+    for (const word of paragraph.split(/\s+/)) {
+      const candidate = line ? `${line} ${word}` : word;
+      if (line && context.measureText(candidate).width > maxLineWidth) {
+        lines.push(line);
+        line = word;
+      } else {
+        line = candidate;
+      }
+    }
+    lines.push(line);
+  }
+
+  const lineWidths = lines.map((line) => context.measureText(line).width);
+  const maxTextWidth = Math.max(0, ...lineWidths);
+  const padding = fontSize * 0.3;
+  const textBlockHeight = lineHeight * lines.length;
+  const left = mapped.x - maxTextWidth / 2;
+  if (title.background) {
+    context.fillStyle = title.background;
+    context.fillRect(left - padding, mapped.y - textBlockHeight / 2 - padding, maxTextWidth + padding * 2, textBlockHeight + padding * 2);
+  }
+  context.fillStyle = title.color;
+  context.shadowColor = title.shadow ? 'rgba(0,0,0,.8)' : 'transparent';
+  context.shadowBlur = title.shadow ? fontSize * 0.3 : 0;
+  context.shadowOffsetY = title.shadow ? fontSize * 0.1 : 0;
+  lines.forEach((line, index) => {
+    const lineWidth = lineWidths[index];
+    const lineX = title.align === 'left'
+      ? left
+      : title.align === 'right'
+        ? left + maxTextWidth - lineWidth
+        : left + (maxTextWidth - lineWidth) / 2;
+    context.fillText(line, lineX, mapped.y + (index - (lines.length - 1) / 2) * lineHeight, maxLineWidth);
+  });
+  context.restore();
+}
+
 export async function renderVideo({
   audioFile,
   assets,
+  tracks,
   clips,
+  titles,
   width,
   height,
   frameRate,
@@ -157,24 +203,28 @@ export async function renderVideo({
     const drawAtTime = (time: number) => {
       context.fillStyle = '#000';
       context.fillRect(0, 0, width, height);
-      const current = locateClip(clips, time);
-      if (!current) return;
-      const visual = visuals.get(current.clip.assetId);
-      if (visual instanceof HTMLVideoElement) seekVideo(visual, current.clip.start + current.elapsed);
-
-      const transitionDuration = 0.4;
-      const transitionProgress = current.clip.transition === 'fade'
-        ? Math.min(1, current.elapsed / transitionDuration)
-        : 1;
-      if (current.clip.transition === 'fade' && current.elapsed < transitionDuration && current.offset > 0) {
-        const previous = locateClip(clips, Math.max(0, current.offset - 0.01));
-        const previousVisual = previous ? visuals.get(previous.clip.assetId) : undefined;
-        if (previous && previousVisual) {
-          if (previousVisual instanceof HTMLVideoElement) seekVideo(previousVisual, previous.clip.start + previous.elapsed);
-          drawVisual(context, previousVisual, previous.clip, width, height, 1 - transitionProgress);
+      const active = getActiveClips(tracks, clips, time);
+      for (const { clip, elapsed } of active) {
+        const visual = visuals.get(clip.assetId);
+        if (!visual) continue;
+        if (visual instanceof HTMLVideoElement) seekVideo(visual, getClipSourceTime(clip, time));
+        const transitionProgress = clip.transition === 'fade' ? Math.min(1, elapsed / 0.4) : 1;
+        const earlierActiveOnTrack = active.some((item) => item.clip.trackId === clip.trackId
+          && item.clip.id !== clip.id
+          && item.clip.timelinePosition < clip.timelinePosition);
+        if (clip.transition === 'fade' && elapsed < 0.4 && !earlierActiveOnTrack) {
+          const previousClip = getPreviousClipOnTrack(clips, clip.trackId, clip.timelinePosition);
+          const previousVisual = previousClip ? visuals.get(previousClip.assetId) : undefined;
+          if (previousClip && previousVisual) {
+            if (previousVisual instanceof HTMLVideoElement) {
+              seekVideo(previousVisual, getClipSourceTime(previousClip, previousClip.timelinePosition + getClipDuration(previousClip)));
+            }
+            drawVisual(context, previousVisual, previousClip, width, height, 1 - transitionProgress);
+          }
         }
+        drawVisual(context, visual, clip, width, height, transitionProgress);
       }
-      if (visual) drawVisual(context, visual, current.clip, width, height, transitionProgress);
+      getActiveTitles(titles, time).forEach((title) => drawTitle(context, title, width, height));
     };
 
     const drawFrame = () => {

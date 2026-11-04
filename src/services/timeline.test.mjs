@@ -1,17 +1,28 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
+  clampTimelineTime,
   defaultTransform,
+  duplicateTimelineClip,
   getClipDuration,
   getTimelineDuration,
+  getTimelinePositionFromDrop,
   moveClip,
+  getActiveClips,
+  getClipSourceTime,
+  locateClipAtTime,
   platformPresets,
+  snapTimelinePosition,
   splitClip,
+  splitClipAtTimelineTime,
 } from './timeline.ts';
+import { shouldSeekPreviewVideo } from './videoPreview.ts';
 
 const videoClip = (id, start = 0, end = 10) => ({
   id,
   assetId: `asset-${id}`,
+  trackId: 'track-a',
+  timelinePosition: 0,
   start,
   end,
   stillDuration: 5,
@@ -25,8 +36,58 @@ test('uses source range for video and configured duration for stills', () => {
 });
 
 test('sums sequence duration', () => {
-  const still = { ...videoClip('two'), end: 0, stillDuration: 3 };
+  const still = { ...videoClip('two'), timelinePosition: 4, end: 0, stillDuration: 3 };
   assert.equal(getTimelineDuration([videoClip('one', 0, 4), still]), 7);
+});
+
+test('clamps timeline seeks to the soundtrack playback boundary without changing clips', () => {
+  const clip = { ...videoClip('after-soundtrack', 0, 8), timelinePosition: 12 };
+  const originalClip = { ...clip };
+  assert.equal(clampTimelineTime(15, 10), 10);
+  assert.equal(clampTimelineTime(-2, 10), 0);
+  assert.equal(clampTimelineTime(Number.POSITIVE_INFINITY, 10), 0);
+  assert.equal(clampTimelineTime(4, Number.NaN), 0);
+  assert.equal(getTimelineDuration([clip]), 20);
+  assert.deepEqual(clip, originalClip);
+});
+
+test('snaps clip positions deterministically while keeping an explicit unsnapped path', () => {
+  assert.equal(snapTimelinePosition(1.24, true), 1.2);
+  assert.equal(snapTimelinePosition(1.25, true), 1.3);
+  assert.equal(snapTimelinePosition(1.26, true), 1.3);
+  assert.equal(snapTimelinePosition(-0.04, true), 0);
+  assert.equal(snapTimelinePosition(-2, false), 0);
+  assert.equal(snapTimelinePosition(1.234, false), 1.234);
+  assert.equal(snapTimelinePosition(Number.NaN, true), 0);
+  assert.equal(snapTimelinePosition(1.26, true, 0), 1.3);
+});
+
+test('converts pointer drops to absolute positions while preserving the grab offset', () => {
+  assert.equal(getTimelinePositionFromDrop(250, 50, 100, 25, false), 1.75);
+  assert.equal(getTimelinePositionFromDrop(250, 50, 100, 25, true), 1.8);
+  assert.equal(getTimelinePositionFromDrop(60, 50, 100, 25, false), 0);
+  assert.equal(getTimelinePositionFromDrop(250, 50, 0, 25, true), 0);
+});
+
+test('maps overlaps to absolute time, respects visibility, and layers in track order', () => {
+  const tracks = [
+    { id: 'top', name: 'Top', order: 1, visible: true, locked: false },
+    { id: 'base', name: 'Base', order: 0, visible: true, locked: false },
+    { id: 'hidden', name: 'Hidden', order: 2, visible: false, locked: false },
+  ];
+  const clips = [
+    { ...videoClip('overlay'), trackId: 'top', timelinePosition: 2 },
+    { ...videoClip('background', 1, 6), trackId: 'base', timelinePosition: 0 },
+    { ...videoClip('hidden'), trackId: 'hidden', timelinePosition: 0 },
+  ];
+  assert.equal(getTimelineDuration(clips), 12);
+  assert.deepEqual(getActiveClips(tracks, clips, 4).map(({ clip, elapsed }) => [clip.id, elapsed]), [
+    ['background', 4],
+    ['overlay', 2],
+  ]);
+  assert.deepEqual(getActiveClips(tracks, clips, 6).map(({ clip }) => clip.id), ['overlay']);
+  assert.equal(locateClipAtTime(clips, 4).clip.id, 'overlay');
+  assert.equal(getClipSourceTime(clips[0], 4), 2);
 });
 
 test('moves a clip without mutating the original list', () => {
@@ -44,7 +105,44 @@ test('splits a clip into adjacent source ranges', () => {
   assert.equal(split[0].end, 7);
   assert.equal(split[1].start, 7);
   assert.equal(split[1].end, 12);
+  assert.equal(split[1].timelinePosition, 5);
   assert.equal(getTimelineDuration(split), getTimelineDuration(clips));
+});
+
+test('duplicates clips directly after the source with a unique ID and preserved editing properties', () => {
+  const source = {
+    ...videoClip('source', 2, 8),
+    trackId: 'track-overlay',
+    timelinePosition: 3.5,
+    transition: 'fade',
+    transform: { ...defaultTransform, zoom: 1.7, x: -12, rotation: 90 },
+  };
+  const existing = videoClip('already-used-id');
+  const clips = [source, existing];
+  const generatedIds = ['already-used-id', 'duplicate-id'];
+  const duplicated = duplicateTimelineClip(clips, 'source', () => generatedIds.shift());
+  const copy = duplicated[1];
+  assert.equal(copy.id, 'duplicate-id');
+  assert.equal(copy.trackId, source.trackId);
+  assert.equal(copy.timelinePosition, source.timelinePosition + getClipDuration(source));
+  assert.deepEqual([copy.start, copy.end], [source.start, source.end]);
+  assert.equal(copy.transition, source.transition);
+  assert.deepEqual(copy.transform, source.transform);
+  assert.notEqual(copy.transform, source.transform);
+  assert.deepEqual(clips, [source, existing]);
+  assert.equal(duplicateTimelineClip(clips, 'missing'), clips);
+});
+
+test('splits at the absolute playhead while retaining source in/out and still duration', () => {
+  const video = { ...videoClip('video', 4, 10), timelinePosition: 12 };
+  assert.equal(getClipSourceTime(video, 15), 7);
+  const [videoA, videoB] = splitClipAtTimelineTime([video], 'video', 15);
+  assert.deepEqual([videoA.start, videoA.end, videoA.timelinePosition], [4, 7, 12]);
+  assert.deepEqual([videoB.start, videoB.end, videoB.timelinePosition], [7, 10, 15]);
+  const still = { ...videoClip('still'), end: 0, timelinePosition: 5, stillDuration: 8 };
+  const [stillA, stillB] = splitClipAtTimelineTime([still], 'still', 8);
+  assert.deepEqual([stillA.stillDuration, stillA.timelinePosition], [3, 5]);
+  assert.deepEqual([stillB.stillDuration, stillB.timelinePosition], [5, 8]);
 });
 
 test('keeps common platform presets available', () => {
@@ -55,4 +153,21 @@ test('keeps common platform presets available', () => {
     { ...platformPresets.find((preset) => preset.id === 'tiktok') },
     { id: 'tiktok', platform: 'TikTok', placement: 'Video', width: 1080, height: 1920 },
   );
+});
+
+test('forces preview seeks to in-points around the reported failure range', () => {
+  for (const targetTime of [0, 0.1, 0.2, 0.4, 0.5]) {
+    assert.equal(
+      shouldSeekPreviewVideo(0, targetTime, true),
+      true,
+      `expected a forced seek for ${targetTime}s`,
+    );
+  }
+});
+
+test('retains the playback drift threshold but forces seeks after paused scrubs', () => {
+  assert.equal(shouldSeekPreviewVideo(0, 0.2), false);
+  assert.equal(shouldSeekPreviewVideo(0, 0.4), false);
+  assert.equal(shouldSeekPreviewVideo(0, 0.5), true);
+  assert.equal(shouldSeekPreviewVideo(0, 0.2, true), true);
 });

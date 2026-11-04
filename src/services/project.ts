@@ -1,0 +1,437 @@
+import { DEFAULT_TRACK_ID, defaultVideoTrack, type TimelineClip, type TimelineTrack, type VisualTransform } from './timeline.ts';
+import { TITLE_FONT_FAMILIES, type TitleAlignment, type TitleOverlay } from './titleOverlay.ts';
+
+/**
+ * JSON-safe metadata for a visual TimelineAsset. The File and object URL stay
+ * in the runtime-only TimelineAsset and are deliberately absent here.
+ */
+export type ProjectVisualAsset = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  kind: 'image' | 'video';
+  duration: number;
+};
+
+/** JSON-safe metadata for the app's single runtime audio File. */
+export type ProjectAudioAsset = {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  size: number;
+  duration: number;
+};
+
+export type ProjectOutputSettings = {
+  presetId: string;
+  customWidth: number;
+  customHeight: number;
+  frameRate: number;
+  format: 'MP4' | 'WebM';
+};
+
+/**
+ * Version 3 of the storage-agnostic project document.
+ * TimelineClip and VisualTransform are the same edit values used at runtime.
+ */
+export type ProjectDocument = {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  schemaVersion: 3;
+  audio: ProjectAudioAsset | null;
+  assets: ProjectVisualAsset[];
+  tracks: TimelineTrack[];
+  clips: TimelineClip[];
+  titleOverlays: TitleOverlay[];
+  outputSettings: ProjectOutputSettings;
+};
+
+export class ProjectDocumentError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'ProjectDocumentError';
+  }
+}
+
+type RecordValue = Record<string, unknown>;
+
+function fail(path: string, reason: string): never {
+  throw new ProjectDocumentError(`Invalid project document at ${path}: ${reason}`);
+}
+
+function recordAt(value: unknown, path: string): RecordValue {
+  if (value === null || typeof value !== 'object' || Array.isArray(value)) {
+    return fail(path, 'expected an object');
+  }
+  const prototype = Object.getPrototypeOf(value);
+  if (prototype !== Object.prototype && prototype !== null) {
+    return fail(path, 'expected a plain JSON object');
+  }
+  return value as RecordValue;
+}
+
+function exactKeys(record: RecordValue, path: string, expected: readonly string[]): void {
+  const ownKeys = Reflect.ownKeys(record);
+  const unexpected = ownKeys.find((key) => typeof key !== 'string' || !expected.includes(key));
+  if (unexpected !== undefined) {
+    return fail(path, `unexpected field ${String(unexpected)}; only JSON project fields are allowed`);
+  }
+  const missing = expected.find((key) => !Object.prototype.hasOwnProperty.call(record, key));
+  if (missing) return fail(`${path}.${missing}`, 'required field is missing');
+}
+
+function stringAt(value: unknown, path: string, allowEmpty = false): string {
+  if (typeof value !== 'string' || (!allowEmpty && value.trim().length === 0)) {
+    return fail(path, allowEmpty ? 'expected a string' : 'expected a non-empty string');
+  }
+  if (value.trim().toLowerCase().startsWith('blob:')) {
+    return fail(path, 'object URLs are not permitted in project data');
+  }
+  return value;
+}
+
+function numberAt(
+  value: unknown,
+  path: string,
+  options: { minimum?: number; integer?: boolean } = {},
+): number {
+  if (
+    typeof value !== 'number'
+    || !Number.isFinite(value)
+    || (options.minimum !== undefined && value < options.minimum)
+    || (options.integer && !Number.isSafeInteger(value))
+  ) {
+    const constraints = [
+      'expected a finite number',
+      options.minimum !== undefined ? ` >= ${options.minimum}` : '',
+      options.integer ? ' and a safe integer' : '',
+    ].join('');
+    return fail(path, constraints);
+  }
+  return value;
+}
+
+function timestampAt(value: unknown, path: string): string {
+  const timestamp = stringAt(value, path);
+  const parsed = new Date(timestamp);
+  if (Number.isNaN(parsed.getTime()) || parsed.toISOString() !== timestamp) {
+    return fail(path, 'expected a canonical ISO 8601 timestamp');
+  }
+  return timestamp;
+}
+
+function validateAudio(value: unknown): ProjectAudioAsset | null {
+  if (value === null) return null;
+  const path = 'audio';
+  const audio = recordAt(value, path);
+  exactKeys(audio, path, ['id', 'fileName', 'mimeType', 'size', 'duration']);
+  return {
+    id: stringAt(audio.id, `${path}.id`),
+    fileName: stringAt(audio.fileName, `${path}.fileName`),
+    mimeType: stringAt(audio.mimeType, `${path}.mimeType`, true),
+    size: numberAt(audio.size, `${path}.size`, { minimum: 0, integer: true }),
+    // The existing app preserves an audio file even when metadata duration
+    // could not be read, represented by 0.
+    duration: numberAt(audio.duration, `${path}.duration`, { minimum: 0 }),
+  };
+}
+
+function validateAsset(value: unknown, index: number): ProjectVisualAsset {
+  const path = `assets[${index}]`;
+  const asset = recordAt(value, path);
+  exactKeys(asset, path, ['id', 'fileName', 'mimeType', 'size', 'kind', 'duration']);
+
+  if (asset.kind !== 'image' && asset.kind !== 'video') {
+    return fail(`${path}.kind`, 'expected "image" or "video"');
+  }
+  return {
+    id: stringAt(asset.id, `${path}.id`),
+    fileName: stringAt(asset.fileName, `${path}.fileName`),
+    mimeType: stringAt(asset.mimeType, `${path}.mimeType`, true),
+    size: numberAt(asset.size, `${path}.size`, { minimum: 0, integer: true }),
+    kind: asset.kind,
+    duration: numberAt(asset.duration, `${path}.duration`, { minimum: 0 }),
+  };
+}
+
+function validateTransform(value: unknown, path: string): VisualTransform {
+  const transform = recordAt(value, path);
+  exactKeys(transform, path, ['fit', 'zoom', 'x', 'y', 'rotation', 'flipX', 'flipY']);
+  if (transform.fit !== 'cover' && transform.fit !== 'contain') {
+    return fail(`${path}.fit`, 'expected "cover" or "contain"');
+  }
+  if (typeof transform.flipX !== 'boolean') return fail(`${path}.flipX`, 'expected a boolean');
+  if (typeof transform.flipY !== 'boolean') return fail(`${path}.flipY`, 'expected a boolean');
+  return {
+    fit: transform.fit,
+    zoom: numberAt(transform.zoom, `${path}.zoom`, { minimum: Number.MIN_VALUE }),
+    x: numberAt(transform.x, `${path}.x`),
+    y: numberAt(transform.y, `${path}.y`),
+    rotation: numberAt(transform.rotation, `${path}.rotation`),
+    flipX: transform.flipX,
+    flipY: transform.flipY,
+  };
+}
+
+function validateClip(value: unknown, index: number, version: 1 | 2 | 3): TimelineClip {
+  const path = `clips[${index}]`;
+  const clip = recordAt(value, path);
+  exactKeys(clip, path, version === 1
+    ? ['id', 'assetId', 'start', 'end', 'stillDuration', 'transition', 'transform']
+    : ['id', 'assetId', 'trackId', 'timelinePosition', 'start', 'end', 'stillDuration', 'transition', 'transform']);
+  if (clip.transition !== 'none' && clip.transition !== 'fade') {
+    return fail(`${path}.transition`, 'expected "none" or "fade"');
+  }
+  const start = numberAt(clip.start, `${path}.start`, { minimum: 0 });
+  const end = numberAt(clip.end, `${path}.end`, { minimum: 0 });
+  if (end < start) return fail(`${path}.end`, 'must be greater than or equal to start');
+  return {
+    id: stringAt(clip.id, `${path}.id`),
+    assetId: stringAt(clip.assetId, `${path}.assetId`),
+    trackId: version >= 2 ? stringAt(clip.trackId, `${path}.trackId`) : DEFAULT_TRACK_ID,
+    timelinePosition: version >= 2
+      ? numberAt(clip.timelinePosition, `${path}.timelinePosition`, { minimum: 0 })
+      : 0,
+    start,
+    end,
+    stillDuration: numberAt(clip.stillDuration, `${path}.stillDuration`, { minimum: Number.MIN_VALUE }),
+    transition: clip.transition,
+    transform: validateTransform(clip.transform, `${path}.transform`),
+  };
+}
+
+function validateTitleOverlay(value: unknown, index: number): TitleOverlay {
+  const path = `titleOverlays[${index}]`;
+  const title = recordAt(value, path);
+  exactKeys(title, path, [
+    'id', 'text', 'start', 'duration', 'x', 'y', 'fontSize', 'fontWeight',
+    'fontFamily', 'color', 'align', 'background', 'shadow',
+  ]);
+  const id = stringAt(title.id, `${path}.id`);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) {
+    return fail(`${path}.id`, 'must be 1–128 alphanumeric, period, underscore, colon, or hyphen characters');
+  }
+  const text = stringAt(title.text, `${path}.text`);
+  if (text.length > 500) return fail(`${path}.text`, 'must be at most 500 characters');
+  if (/[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F]/.test(text)) {
+    return fail(`${path}.text`, 'contains unsupported control characters');
+  }
+  const start = numberAt(title.start, `${path}.start`, { minimum: 0 });
+  const duration = numberAt(title.duration, `${path}.duration`, { minimum: 0.1 });
+  if (start > 86_400 || duration > 86_400 || start + duration > 86_400) {
+    return fail(path, 'title timing must remain within 24 hours');
+  }
+  const x = numberAt(title.x, `${path}.x`, { minimum: 0 });
+  const y = numberAt(title.y, `${path}.y`, { minimum: 0 });
+  if (x > 100) return fail(`${path}.x`, 'must be between 0 and 100 percent');
+  if (y > 100) return fail(`${path}.y`, 'must be between 0 and 100 percent');
+  const fontSize = numberAt(title.fontSize, `${path}.fontSize`, { minimum: 2 });
+  if (fontSize > 20) return fail(`${path}.fontSize`, 'must be between 2 and 20 percent of output height');
+  if (title.fontWeight !== 400 && title.fontWeight !== 700) {
+    return fail(`${path}.fontWeight`, 'expected 400 or 700');
+  }
+  if (!TITLE_FONT_FAMILIES.includes(title.fontFamily as typeof TITLE_FONT_FAMILIES[number])) {
+    return fail(`${path}.fontFamily`, 'expected a supported system-safe font family');
+  }
+  const colorAt = (color: unknown, colorPath: string): string => {
+    if (typeof color !== 'string' || !/^#[0-9A-Fa-f]{6}$/.test(color)) {
+      return fail(colorPath, 'expected a six-digit hex color');
+    }
+    return color.toUpperCase();
+  };
+  if (title.align !== 'left' && title.align !== 'center' && title.align !== 'right') {
+    return fail(`${path}.align`, 'expected "left", "center", or "right"');
+  }
+  if (title.background !== null && typeof title.background !== 'string') {
+    return fail(`${path}.background`, 'expected a six-digit hex color or null');
+  }
+  if (typeof title.shadow !== 'boolean') return fail(`${path}.shadow`, 'expected a boolean');
+  return {
+    id,
+    text,
+    start,
+    duration,
+    x,
+    y,
+    fontSize,
+    fontWeight: title.fontWeight,
+    fontFamily: title.fontFamily as TitleOverlay['fontFamily'],
+    color: colorAt(title.color, `${path}.color`),
+    align: title.align as TitleAlignment,
+    background: title.background === null ? null : colorAt(title.background, `${path}.background`),
+    shadow: title.shadow,
+  };
+}
+
+function validateTrack(value: unknown, index: number): TimelineTrack {
+  const path = `tracks[${index}]`;
+  const track = recordAt(value, path);
+  exactKeys(track, path, ['id', 'name', 'order', 'visible', 'locked']);
+  if (typeof track.visible !== 'boolean') return fail(`${path}.visible`, 'expected a boolean');
+  if (typeof track.locked !== 'boolean') return fail(`${path}.locked`, 'expected a boolean');
+  return {
+    id: stringAt(track.id, `${path}.id`),
+    name: stringAt(track.name, `${path}.name`),
+    order: numberAt(track.order, `${path}.order`, { minimum: 0, integer: true }),
+    visible: track.visible,
+    locked: track.locked,
+  };
+}
+
+function validateOutputSettings(value: unknown): ProjectOutputSettings {
+  const path = 'outputSettings';
+  const settings = recordAt(value, path);
+  exactKeys(settings, path, ['presetId', 'customWidth', 'customHeight', 'frameRate', 'format']);
+  const presetId = stringAt(settings.presetId, `${path}.presetId`);
+  const frameRate = numberAt(settings.frameRate, `${path}.frameRate`);
+  if (![24, 30, 60].includes(frameRate)) {
+    return fail(`${path}.frameRate`, 'expected 24, 30, or 60');
+  }
+  if (settings.format !== 'MP4' && settings.format !== 'WebM') {
+    return fail(`${path}.format`, 'expected "MP4" or "WebM"');
+  }
+  return {
+    presetId,
+    customWidth: numberAt(settings.customWidth, `${path}.customWidth`, { minimum: 1, integer: true }),
+    customHeight: numberAt(settings.customHeight, `${path}.customHeight`, { minimum: 1, integer: true }),
+    frameRate,
+    format: settings.format,
+  };
+}
+
+/**
+ * Validates untrusted document data and returns a fresh object containing only
+ * the schema's explicit fields. Unknown keys (including File/url properties)
+ * are rejected rather than being silently serialized.
+ */
+export function validateProjectDocument(value: unknown): ProjectDocument {
+  const path = 'project';
+  const project = recordAt(value, path);
+  const version = project.schemaVersion;
+  if (version !== 1 && version !== 2 && version !== 3) {
+    return fail('schemaVersion', `unsupported schema version ${String(version)} (supported: 1, 2, 3)`);
+  }
+  exactKeys(project, path, version === 1 ? [
+    'id',
+    'name',
+    'createdAt',
+    'updatedAt',
+    'schemaVersion',
+    'audio',
+    'assets',
+    'clips',
+    'outputSettings',
+  ] : version === 2 ? [
+    'id',
+    'name',
+    'createdAt',
+    'updatedAt',
+    'schemaVersion',
+    'audio',
+    'assets',
+    'tracks',
+    'clips',
+    'outputSettings',
+  ] : [
+    'id',
+    'name',
+    'createdAt',
+    'updatedAt',
+    'schemaVersion',
+    'audio',
+    'assets',
+    'tracks',
+    'clips',
+    'outputSettings',
+    'titleOverlays',
+  ]);
+  if (!Array.isArray(project.assets)) return fail('assets', 'expected an array');
+  if (!Array.isArray(project.clips)) return fail('clips', 'expected an array');
+  if (version >= 2 && !Array.isArray(project.tracks)) return fail('tracks', 'expected an array');
+  if (version === 3 && !Array.isArray(project.titleOverlays)) return fail('titleOverlays', 'expected an array');
+
+  const projectId = stringAt(project.id, 'project.id');
+  const name = stringAt(project.name, 'project.name');
+  const createdAt = timestampAt(project.createdAt, 'project.createdAt');
+  const updatedAt = timestampAt(project.updatedAt, 'project.updatedAt');
+  const assets = project.assets.map(validateAsset);
+  let clips = project.clips.map((clip, index) => validateClip(clip, index, version));
+  const tracks = version === 1
+    ? [defaultVideoTrack()]
+    : (project.tracks as unknown[]).map(validateTrack);
+  if (version === 1) {
+    let timelinePosition = 0;
+    clips = clips.map((clip) => {
+      const positioned = { ...clip, trackId: DEFAULT_TRACK_ID, timelinePosition };
+      timelinePosition += Math.max(0, clip.end - clip.start) || clip.stillDuration;
+      return positioned;
+    });
+  }
+  const audio = validateAudio(project.audio);
+  const titleOverlays = version === 3
+    ? (project.titleOverlays as unknown[]).map(validateTitleOverlay)
+    : [];
+  const ids = new Set<string>();
+  const entityIds = [
+    projectId,
+    ...(audio ? [audio.id] : []),
+    ...assets.map((asset) => asset.id),
+    ...tracks.map((track) => track.id),
+    ...clips.map((clip) => clip.id),
+    ...titleOverlays.map((title) => title.id),
+  ];
+  for (const id of entityIds) {
+    if (ids.has(id)) return fail('ids', `duplicate id "${id}"`);
+    ids.add(id);
+  }
+  const assetIds = new Set(assets.map((asset) => asset.id));
+  const trackIds = new Set(tracks.map((track) => track.id));
+  if (!tracks.length) return fail('tracks', 'at least one visual track is required');
+  for (const [index, track] of tracks.entries()) {
+    if (tracks.findIndex((other) => other.order === track.order) !== index) {
+      return fail(`tracks[${index}].order`, 'track order values must be unique');
+    }
+  }
+  for (const [index, clip] of clips.entries()) {
+    if (!assetIds.has(clip.assetId)) {
+      return fail(`clips[${index}].assetId`, `references missing visual asset "${clip.assetId}"`);
+    }
+    if (!trackIds.has(clip.trackId)) {
+      return fail(`clips[${index}].trackId`, `references missing visual track "${clip.trackId}"`);
+    }
+  }
+
+  return {
+    id: projectId,
+    name,
+    createdAt,
+    updatedAt,
+    schemaVersion: 3,
+    audio,
+    assets,
+    tracks,
+    clips,
+    titleOverlays,
+    outputSettings: validateOutputSettings(project.outputSettings),
+  };
+}
+
+/** Serialize only schema-validated fields to JSON; no runtime media values are included. */
+export function serializeProject(document: ProjectDocument): string {
+  return JSON.stringify(validateProjectDocument(document));
+}
+
+/** Parse and validate a JSON project document with actionable error messages. */
+export function parseProject(json: string): ProjectDocument {
+  let value: unknown;
+  try {
+    value = JSON.parse(json) as unknown;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new ProjectDocumentError(`Invalid project JSON: ${detail}`);
+  }
+  return validateProjectDocument(value);
+}
