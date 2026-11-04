@@ -8,7 +8,7 @@ const sampleProject = () => ({
   name: 'Social cut',
   createdAt: '2026-11-02T12:00:00.000Z',
   updatedAt: '2026-11-02T12:30:00.000Z',
-  schemaVersion: 3,
+  schemaVersion: 4,
   audio: {
     id: 'audio-1',
     fileName: 'narration.wav',
@@ -63,6 +63,7 @@ const sampleProject = () => ({
     },
   ],
   titleOverlays: [],
+  markers: [],
   outputSettings: {
     presetId: 'custom',
     customWidth: 1440,
@@ -95,20 +96,22 @@ test('reports invalid JSON and malformed schema documents', () => {
   delete missingAudio.audio;
   assert.throws(() => parseProject(JSON.stringify(missingAudio)), /project\.audio/);
   assert.throws(
-    () => parseProject(JSON.stringify({ ...sampleProject(), schemaVersion: 4 })),
-    /unsupported schema version 4/,
+    () => parseProject(JSON.stringify({ ...sampleProject(), schemaVersion: 5 })),
+    /unsupported schema version 5/,
   );
 });
 
-test('migrates a legacy v1 ordered sequence to a default track and v3 without changing clip timing or edits', () => {
+test('migrates a legacy v1 ordered sequence to a default track and v4 without changing clip timing or edits', () => {
   const legacy = sampleProject();
   legacy.schemaVersion = 1;
   delete legacy.tracks;
   delete legacy.titleOverlays;
+  delete legacy.markers;
   legacy.clips = legacy.clips.map(({ trackId, timelinePosition, ...clip }) => clip);
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
   assert.deepEqual(migrated.titleOverlays, []);
+  assert.deepEqual(migrated.markers, []);
   assert.deepEqual(migrated.tracks, [{
     id: 'track-video-1', name: 'Video 1', order: 0, visible: true, locked: false,
   }]);
@@ -125,18 +128,62 @@ test('migrates a legacy v1 ordered sequence to a default track and v3 without ch
   assert.deepEqual(migrated.audio, legacy.audio);
 });
 
-test('migrates v2 projects to v3 while preserving tracks, clips, media, and output settings', () => {
+test('migrates v2 projects to v4 while preserving tracks, clips, media, and output settings', () => {
   const legacy = sampleProject();
   legacy.schemaVersion = 2;
   delete legacy.titleOverlays;
+  delete legacy.markers;
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.schemaVersion, 3);
+  assert.equal(migrated.schemaVersion, 4);
   assert.deepEqual(migrated.titleOverlays, []);
+  assert.deepEqual(migrated.markers, []);
   assert.deepEqual(migrated.tracks, legacy.tracks);
   assert.deepEqual(migrated.clips, legacy.clips);
   assert.deepEqual(migrated.assets, legacy.assets);
   assert.deepEqual(migrated.audio, legacy.audio);
   assert.deepEqual(migrated.outputSettings, legacy.outputSettings);
+});
+
+test('migrates v3 documents by preserving existing fields and adding an empty marker list', () => {
+  const legacy = sampleProject();
+  legacy.schemaVersion = 3;
+  delete legacy.markers;
+  const migrated = parseProject(JSON.stringify(legacy));
+  assert.equal(migrated.schemaVersion, 4);
+  assert.deepEqual(migrated.markers, []);
+  assert.deepEqual(migrated.titleOverlays, legacy.titleOverlays);
+  assert.deepEqual(migrated.tracks, legacy.tracks);
+  assert.deepEqual(migrated.clips, legacy.clips);
+  assert.deepEqual(migrated.assets, legacy.assets);
+  assert.deepEqual(migrated.audio, legacy.audio);
+  assert.deepEqual(migrated.outputSettings, legacy.outputSettings);
+});
+
+test('round-trips timeline markers and strictly rejects invalid marker data', () => {
+  const project = sampleProject();
+  project.markers = [{ id: 'marker-1', time: 12.5, label: 'Chorus' }];
+  assert.deepEqual(parseProject(serializeProject(project)).markers, project.markers);
+
+  for (const marker of [
+    { id: 'marker-1', time: -1, label: 'Negative' },
+    { id: 'marker-1', time: Number.NaN, label: 'Not finite' },
+    { id: 'marker-1', time: 86_400.1, label: 'Too late' },
+    { id: 'marker-1', time: 0, label: '   ' },
+    { id: 'marker-1', time: 0, label: 'x'.repeat(81) },
+    { id: 'marker-1', time: 0, label: 'Unknown field', unexpected: true },
+  ]) {
+    const invalid = sampleProject();
+    invalid.markers = [marker];
+    assert.throws(() => serializeProject(invalid), ProjectDocumentError);
+  }
+
+  const duplicate = sampleProject();
+  duplicate.markers = [{ id: 'clip-image', time: 0, label: 'Duplicate ID' }];
+  assert.throws(() => serializeProject(duplicate), /duplicate id "clip-image"/);
+
+  const unexpected = sampleProject();
+  unexpected.unexpected = true;
+  assert.throws(() => serializeProject(unexpected), /unexpected field unexpected/);
 });
 
 test('serializes title overlays and strictly rejects malformed title values or fields', () => {

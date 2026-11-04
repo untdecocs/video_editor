@@ -1,5 +1,5 @@
-import { useMemo, useRef, useState } from 'react';
-import type { TimelineAsset, TimelineClip, TimelineTrack, VisualTransform } from '../services/timeline';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import type { TimelineAsset, TimelineClip, TimelineMarker, TimelineTrack, VisualTransform } from '../services/timeline';
 import type { TitleOverlay } from '../services/titleOverlay';
 import {
   clampTimelineTime,
@@ -13,6 +13,7 @@ type TimelineEditorProps = {
   tracks: TimelineTrack[];
   clips: TimelineClip[];
   titles: TitleOverlay[];
+  markers: TimelineMarker[];
   selectedTitleId: string;
   selectedClipId: string;
   currentTime: number;
@@ -29,29 +30,38 @@ type TimelineEditorProps = {
   onDuplicate: (id: string) => void;
   onSelectTitle: (id: string) => void;
   onSeekTitle: (time: number) => void;
+  onAddMarker: () => void;
+  onRenameMarker: (id: string, label: string) => void;
+  onRemoveMarker: (id: string) => void;
 };
 
 const formatTime = (time: number) => `${Math.floor(time / 60)}:${(time % 60).toFixed(1).padStart(4, '0')}`;
 
 export function TimelineEditor({
-  assets, tracks, clips, titles, selectedTitleId, selectedClipId, currentTime, soundtrackDuration, onSeek, onAddTrack, onTrackChange,
+  assets, tracks, clips, titles, markers, selectedTitleId, selectedClipId, currentTime, soundtrackDuration, onSeek, onAddTrack, onTrackChange,
   onMoveClip, onSelect, onChange, onTransform, onRemove, onSplit, onDuplicate, onSelectTitle, onSeekTitle,
+  onAddMarker, onRenameMarker, onRemoveMarker,
 }: TimelineEditorProps) {
   const [pixelsPerSecond, setPixelsPerSecond] = useState(48);
   const [selectedTrackId, setSelectedTrackId] = useState(tracks[0]?.id ?? '');
   const [snapEnabled, setSnapEnabled] = useState(true);
+  const [markerLabels, setMarkerLabels] = useState<Record<string, string>>({});
   const dragRef = useRef<{ clipId: string; grabOffsetPixels: number } | null>(null);
   // Show the visually highest (largest order) tracks first; renderers draw
   // low-to-high so this display order maps to top-to-bottom compositing.
   const orderedTracks = useMemo(() => [...tracks].sort((a, b) => b.order - a.order), [tracks]);
   const duration = Math.max(getTimelineDuration(clips), 1);
-  const timelineExtent = Math.max(duration, soundtrackDuration, ...titles.map((title) => title.start + title.duration), 1);
+  const timelineExtent = Math.max(duration, soundtrackDuration, ...titles.map((title) => title.start + title.duration), ...markers.map((marker) => marker.time), 1);
   const selectedClip = clips.find((clip) => clip.id === selectedClipId);
   const selectedAsset = assets.find((asset) => asset.id === selectedClip?.assetId);
   const selectedTrack = tracks.find((track) => track.id === selectedClip?.trackId);
   const timelineWidth = Math.max(640, timelineExtent * pixelsPerSecond);
   const ticks = Array.from({ length: Math.ceil(timelineExtent / 5) + 1 }, (_, index) => index * 5).filter((time) => time <= timelineExtent + 0.01);
   const seek = (time: number) => onSeek(clampTimelineTime(time, soundtrackDuration));
+
+  useEffect(() => {
+    setMarkerLabels(Object.fromEntries(markers.map((marker) => [marker.id, marker.label])));
+  }, [markers]);
 
   return (
     <section className="space-y-4 border-t border-neutral-200 pt-5">
@@ -187,12 +197,76 @@ export function TimelineEditor({
               {!titles.length && <span className="absolute left-3 top-3 text-[10px] text-neutral-400">Add titles below to see their timing here.</span>}
             </div>
           </div>
+          <div className="flex border-b border-neutral-200">
+            <div className="flex w-40 shrink-0 flex-col justify-center border-r border-neutral-200 bg-amber-50 px-3 py-2">
+              <span className="text-[10px] font-semibold uppercase tracking-wide text-amber-900">Markers</span>
+              <span className="text-[10px] text-neutral-500">Timeline points</span>
+            </div>
+            <div className="relative h-10 bg-amber-50/40" style={{ width: timelineWidth }} aria-label="Timeline markers">
+              {markers.map((marker) => (
+                <button
+                  key={marker.id}
+                  type="button"
+                  onClick={() => seek(marker.time)}
+                  aria-label={`Seek to marker ${marker.label} at ${formatTime(marker.time)}`}
+                  title={`${marker.label} · ${formatTime(marker.time)}`}
+                  className="absolute top-1 z-10 max-w-32 -translate-x-1/2 truncate border border-amber-400 bg-amber-100 px-2 py-1 text-[10px] font-semibold text-amber-950 hover:bg-amber-200 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-amber-700"
+                  style={{ left: marker.time * pixelsPerSecond }}
+                >
+                  {marker.label}
+                </button>
+              ))}
+              <div className="pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-rose-500" style={{ left: clampTimelineTime(currentTime, soundtrackDuration) * pixelsPerSecond }} aria-hidden="true" />
+              {!markers.length && <span className="absolute left-3 top-3 text-[10px] text-neutral-400">Add a marker to save a point on the timeline.</span>}
+            </div>
+          </div>
           {!clips.length && <p className="px-4 py-8 text-sm text-neutral-500">Add an image or video in the previous step.</p>}
         </div>
       </div>
       <div className="flex flex-wrap items-center gap-3">
         <span className="text-xs font-medium text-neutral-600">Playhead · {formatTime(clampTimelineTime(currentTime, soundtrackDuration))} / {formatTime(soundtrackDuration)}</span>
         <input aria-label="Timeline playhead" type="range" min="0" max={Math.max(soundtrackDuration, 0.1)} step="0.1" value={clampTimelineTime(currentTime, soundtrackDuration)} onChange={(event) => seek(Number(event.target.value))} className="min-w-40 flex-1 accent-moss" />
+      </div>
+      <div className="space-y-3 rounded-sm border border-neutral-200 bg-white p-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div>
+            <h4 className="text-xs font-semibold uppercase tracking-wide text-neutral-600">Timeline markers</h4>
+            <p className="mt-1 text-[11px] text-neutral-500">Add a named point at the current playhead. Select a marker to seek.</p>
+          </div>
+          <button type="button" onClick={onAddMarker} className="border border-amber-500 px-3 py-2 text-xs font-semibold text-amber-950 hover:bg-amber-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-amber-700">
+            Add marker at playhead · {formatTime(clampTimelineTime(currentTime, soundtrackDuration))}
+          </button>
+        </div>
+        {markers.length > 0 && (
+          <ul className="space-y-2">
+            {markers.map((marker) => {
+              const label = markerLabels[marker.id] ?? marker.label;
+              return (
+                <li key={marker.id} className="flex flex-wrap items-end gap-2 border-t border-neutral-100 pt-2">
+                  <label className="min-w-40 flex-1 text-[11px] font-medium text-neutral-600">
+                    Marker label · {formatTime(marker.time)}
+                    <input
+                      type="text"
+                      required
+                      maxLength={80}
+                      value={label}
+                      aria-label={`Label for marker at ${formatTime(marker.time)}`}
+                      onChange={(event) => setMarkerLabels((current) => ({ ...current, [marker.id]: event.target.value }))}
+                      onBlur={() => {
+                        const trimmedLabel = label.trim();
+                        if (trimmedLabel && trimmedLabel.length <= 80) onRenameMarker(marker.id, trimmedLabel);
+                        else setMarkerLabels((current) => ({ ...current, [marker.id]: marker.label }));
+                      }}
+                      className="mt-1 w-full border border-neutral-200 bg-white px-2 py-2 text-xs text-ink focus-visible:outline focus-visible:outline-2 focus-visible:outline-moss"
+                    />
+                  </label>
+                  <button type="button" onClick={() => seek(marker.time)} className="border border-neutral-200 px-3 py-2 text-xs hover:bg-neutral-50" aria-label={`Go to marker ${marker.label} at ${formatTime(marker.time)}`}>Go to</button>
+                  <button type="button" onClick={() => onRemoveMarker(marker.id)} className="border border-red-200 px-3 py-2 text-xs text-red-800 hover:bg-red-50" aria-label={`Delete marker ${marker.label}`}>Delete</button>
+                </li>
+              );
+            })}
+          </ul>
+        )}
       </div>
       {selectedClip && selectedAsset && (
         <div className="grid gap-5 2xl:grid-cols-2">

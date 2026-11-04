@@ -1,4 +1,13 @@
-import { DEFAULT_TRACK_ID, defaultVideoTrack, type TimelineClip, type TimelineTrack, type VisualTransform } from './timeline.ts';
+import {
+  DEFAULT_TRACK_ID,
+  MAX_TIMELINE_MARKER_LABEL_LENGTH,
+  MAX_TIMELINE_MARKER_TIME,
+  defaultVideoTrack,
+  type TimelineClip,
+  type TimelineMarker,
+  type TimelineTrack,
+  type VisualTransform,
+} from './timeline.ts';
 import { TITLE_FONT_FAMILIES, type TitleAlignment, type TitleOverlay } from './titleOverlay.ts';
 
 /**
@@ -32,7 +41,7 @@ export type ProjectOutputSettings = {
 };
 
 /**
- * Version 3 of the storage-agnostic project document.
+ * Version 4 of the storage-agnostic project document.
  * TimelineClip and VisualTransform are the same edit values used at runtime.
  */
 export type ProjectDocument = {
@@ -40,12 +49,13 @@ export type ProjectDocument = {
   name: string;
   createdAt: string;
   updatedAt: string;
-  schemaVersion: 3;
+  schemaVersion: 4;
   audio: ProjectAudioAsset | null;
   assets: ProjectVisualAsset[];
   tracks: TimelineTrack[];
   clips: TimelineClip[];
   titleOverlays: TitleOverlay[];
+  markers: TimelineMarker[];
   outputSettings: ProjectOutputSettings;
 };
 
@@ -176,7 +186,7 @@ function validateTransform(value: unknown, path: string): VisualTransform {
   };
 }
 
-function validateClip(value: unknown, index: number, version: 1 | 2 | 3): TimelineClip {
+function validateClip(value: unknown, index: number, version: 1 | 2 | 3 | 4): TimelineClip {
   const path = `clips[${index}]`;
   const clip = recordAt(value, path);
   exactKeys(clip, path, version === 1
@@ -201,6 +211,28 @@ function validateClip(value: unknown, index: number, version: 1 | 2 | 3): Timeli
     transition: clip.transition,
     transform: validateTransform(clip.transform, `${path}.transform`),
   };
+}
+
+function validateTimelineMarker(value: unknown, index: number): TimelineMarker {
+  const path = `markers[${index}]`;
+  const marker = recordAt(value, path);
+  exactKeys(marker, path, ['id', 'time', 'label']);
+  const id = stringAt(marker.id, `${path}.id`);
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(id)) {
+    return fail(`${path}.id`, 'must be 1–128 alphanumeric, period, underscore, colon, or hyphen characters');
+  }
+  const time = numberAt(marker.time, `${path}.time`, { minimum: 0 });
+  if (time > MAX_TIMELINE_MARKER_TIME) {
+    return fail(`${path}.time`, 'must remain within 24 hours');
+  }
+  const label = stringAt(marker.label, `${path}.label`);
+  if (label.length > MAX_TIMELINE_MARKER_LABEL_LENGTH) {
+    return fail(`${path}.label`, `must be at most ${MAX_TIMELINE_MARKER_LABEL_LENGTH} characters`);
+  }
+  if (/[\u0000-\u001F\u007F]/.test(label)) {
+    return fail(`${path}.label`, 'contains unsupported control characters');
+  }
+  return { id, time, label };
 }
 
 function validateTitleOverlay(value: unknown, index: number): TitleOverlay {
@@ -311,8 +343,8 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
   const path = 'project';
   const project = recordAt(value, path);
   const version = project.schemaVersion;
-  if (version !== 1 && version !== 2 && version !== 3) {
-    return fail('schemaVersion', `unsupported schema version ${String(version)} (supported: 1, 2, 3)`);
+  if (version !== 1 && version !== 2 && version !== 3 && version !== 4) {
+    return fail('schemaVersion', `unsupported schema version ${String(version)} (supported: 1, 2, 3, 4)`);
   }
   exactKeys(project, path, version === 1 ? [
     'id',
@@ -335,6 +367,18 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
     'tracks',
     'clips',
     'outputSettings',
+  ] : version === 3 ? [
+    'id',
+    'name',
+    'createdAt',
+    'updatedAt',
+    'schemaVersion',
+    'audio',
+    'assets',
+    'tracks',
+    'clips',
+    'outputSettings',
+    'titleOverlays',
   ] : [
     'id',
     'name',
@@ -347,11 +391,13 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
     'clips',
     'outputSettings',
     'titleOverlays',
+    'markers',
   ]);
   if (!Array.isArray(project.assets)) return fail('assets', 'expected an array');
   if (!Array.isArray(project.clips)) return fail('clips', 'expected an array');
   if (version >= 2 && !Array.isArray(project.tracks)) return fail('tracks', 'expected an array');
-  if (version === 3 && !Array.isArray(project.titleOverlays)) return fail('titleOverlays', 'expected an array');
+  if (version >= 3 && !Array.isArray(project.titleOverlays)) return fail('titleOverlays', 'expected an array');
+  if (version === 4 && !Array.isArray(project.markers)) return fail('markers', 'expected an array');
 
   const projectId = stringAt(project.id, 'project.id');
   const name = stringAt(project.name, 'project.name');
@@ -371,8 +417,11 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
     });
   }
   const audio = validateAudio(project.audio);
-  const titleOverlays = version === 3
+  const titleOverlays = version >= 3
     ? (project.titleOverlays as unknown[]).map(validateTitleOverlay)
+    : [];
+  const markers = version === 4
+    ? (project.markers as unknown[]).map(validateTimelineMarker)
     : [];
   const ids = new Set<string>();
   const entityIds = [
@@ -382,6 +431,7 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
     ...tracks.map((track) => track.id),
     ...clips.map((clip) => clip.id),
     ...titleOverlays.map((title) => title.id),
+    ...markers.map((marker) => marker.id),
   ];
   for (const id of entityIds) {
     if (ids.has(id)) return fail('ids', `duplicate id "${id}"`);
@@ -409,12 +459,13 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
     name,
     createdAt,
     updatedAt,
-    schemaVersion: 3,
+    schemaVersion: 4,
     audio,
     assets,
     tracks,
     clips,
     titleOverlays,
+    markers,
     outputSettings: validateOutputSettings(project.outputSettings),
   };
 }

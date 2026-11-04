@@ -1,5 +1,7 @@
 import { useRef } from 'react';
-import { formatDuration } from '../services/media';
+import { formatDuration, getSupportedFormatsLabel, audioExtensions } from '../services/media';
+
+const audioAccept = audioExtensions.map((extension) => `.${extension}`).join(',');
 
 type AudioUploaderProps = {
   onFileSelect: (file: File) => void;
@@ -40,7 +42,7 @@ export function AudioUploader({
           ref={inputRef}
           id="audio-upload"
           type="file"
-          accept=".mp3,.wav,.aac,.m4a,.flac,.ogg,.wma,audio/*"
+          accept={audioAccept}
           className="sr-only"
           onChange={(event) => handleFiles(event.target.files)}
         />
@@ -50,7 +52,7 @@ export function AudioUploader({
           <small className="mt-1 block text-xs text-neutral-500">
             {duration > 0
               ? `${formatDuration(duration)} · ${fileSize} · ${detectedType}`
-              : 'MP3, WAV, AAC, M4A, FLAC or OGG'}
+              : `Supported filename extensions: ${getSupportedFormatsLabel('audio')}`}
           </small>
         </span>
         <span className="text-xs font-semibold text-moss">{duration > 0 ? 'Change' : 'Browse'}</span>

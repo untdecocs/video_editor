@@ -43,3 +43,22 @@
 **Automated evidence:** `npm test` passed 14/14; `npm run build` passed. Detailed cases and observations are in `TEST_RESULTS.md` under “BUG-QA01-001 Frontend fix retest.”
 
 **Remaining gap:** Rendered export source-range parity is not verified; neither are native Chrome/Edge/Firefox/Safari or FFmpeg/FFprobe results. This status verifies the preview-seeking defect only, not export parity or full release readiness.
+
+## BUG-DATA-01 — Save As leaves the selector on the prior project
+
+**Severity:** Medium
+**Priority:** P2
+**Affected area:** Local project management / Save As
+**Status:** FIXED AND VERIFIED (2026-11-04)
+
+**Observed behavior:** Saving a separate copy created the new project and updated the project name/status, but the Saved projects selector remained on the previously selected record. Because Open and Delete use the selector's ID, the visible name and action target could disagree.
+
+**Fix:** `refreshProjectList` now accepts an optional preferred project ID. Save As passes the newly-created ID, while ordinary refreshes preserve the current selection when it still exists.
+
+**Retest environment:** Integrated VS Code browser, Electron 43.8.3 / Chromium 150.0.7871.250 on Windows; bounded local Vite server; synthetic QA projects only.
+
+**Retest evidence:** Saved a seed project, saved a distinct copy, confirmed the new ID/name selected, opened both projects by selection and verified names, then deleted the selected copy and confirmed the deletion dialog and list update matched that project. Removed all QA records after the test.
+
+**Retest result:** 4/4 passed. `npm test` passed 40/40 and `npm run build` passed for the focused UI fix before the subsequent marker increment; the latest repository-wide run with markers passes 43/43 and builds successfully.
+
+**Remaining gaps:** This verifies the selector workflow only in integrated Chromium. Native-browser behavior and saved-output export validation remain untested.

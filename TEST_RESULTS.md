@@ -337,11 +337,86 @@ An initial exploratory drag attempt began in the portion of the blue clip obscur
 
 ### Remaining limitations and QA assessment
 
-- User-created timeline markers and the requested track mute/rename workflows were not verified in this run.
+- User-created markers and some requested track controls were not verified in the original TIME-02 run. A Nov 4 marker follow-up passed; mute/rename coverage remains incomplete.
 - Multiple audio clips/tracks remain explicitly unimplemented; only one soundtrack is supported.
 - Ripple/roll/group/link operations remain deferred.
 - Native Chrome, Edge, Firefox, and Safari remain untested; these results apply only to integrated Electron/Chromium on Windows.
 - Export correctness remains unverified for a persisted/downloaded file. No independent decode, audio/synchronization check, or export-parity check was performed.
 - TIME-01 remains in review for broader multi-audio and export/browser gaps. Passing these focused TIME-02 cases does not establish full timeline or release acceptance.
 
-**TIME-02 scoped QA status:** **PASS WITH WARNINGS** for the nine exercised workflows; full task acceptance remains **IN_REVIEW** because marker/track-control coverage and the limitations above remain open.
+**TIME-02 scoped QA status:** **PASS WITH WARNINGS** for the nine original workflows and the eight marker follow-up scenarios. Full task acceptance remains **IN_REVIEW** because track-control coverage, native browser runs, multi-audio, and saved-export validation remain open.
+
+## Nov 4 Save As, marker, and current-workflow browser follow-up
+
+**Environment:** Integrated VS Code browser, Electron 43.8.3 / Chromium 150.0.7871.250 on Windows; local Vite servers were started only for bounded tests and stopped afterward. QA used synthetic/in-memory WAV and SVG/PNG media only. No repository files were changed by the testers, and their saved projects were removed during cleanup.
+
+### Save As selection regression
+
+The broad 16-check pass found that Save As saved a distinct copy but kept the selector on the previously selected project, which could misdirect Open/Delete. The application was fixed to prefer the new ID when refreshing the project list.
+
+| Follow-up check | Result |
+|---|---|
+| Save a seed project, then Save As under a distinct name | **PASS**; the newly-created ID and name became selected |
+| Open the seed and then open the copy by selected ID | **PASS**; opened project names matched selected records |
+| Delete the selected copy | **PASS**; confirmation named the copy and the deleted ID disappeared |
+| Cleanup of synthetic saved records | **PASS**; no QA projects remained |
+
+**Regression total:** 4 passed, 0 failed, 0 blocked. This is Chromium-only coverage, not native-browser coverage.
+
+### Timeline marker browser verification
+
+**Fixture:** 12-second synthetic WAV and 320×180 synthetic SVG; integrated Electron 43.8.3 / Chromium 150 on Windows.
+
+| Test ID | Check | Observed result | Status |
+|---|---|---|---|
+| MARK-BRW-001 | Add marker at a nonzero playhead | At 5.0 sec, `Marker 1` appeared on the timeline at 0:05.0. | **PASS** |
+| MARK-BRW-002 | Activate marker to seek | From 10.0 sec, activating the marker returned the playhead to 5.0 sec. | **PASS** |
+| MARK-BRW-003 | Rename marker | Renamed to `QA Highlight`; timeline label and accessible name updated. | **PASS** |
+| MARK-BRW-004 | Delete marker | Marker disappeared. | **PASS** |
+| MARK-BRW-005 | Undo/redo rename and delete | Undo restored the prior label/marker; redo reapplied rename/deletion; final undo restored the marker. | **PASS** |
+| MARK-BRW-006 | Autosave and reload/recovery | Reload restored the 5.0-sec `QA Highlight` marker and synthetic media. | **PASS** |
+| MARK-BRW-007 | Open a saved project copy | The copy retained `QA Highlight` after another project was edited. | **PASS** |
+| MARK-BRW-008 | Save As selector | The new `QA Marker Recovery` copy became selected. | **PASS** |
+
+**Marker run total:** 8 passed, 0 failed, 0 blocked. Browser-only coverage is limited to integrated Chromium; native browsers and export behavior were not tested.
+
+### Broad current-workflow follow-up
+
+The bounded pass ran 16 checks: 12 passed, 1 failed, and 3 were blocked. Covered storage startup, Save As, autosave/reload, open/delete, visual-track creation and drag, split/duplicate, track visibility/lock, title timing/preview, and the export UI completion message. The failed check was the Save As selector issue above and passed its focused retest. Blocked checks were native file-picker import, downloaded-file inspection/decode, and native Chrome/Edge/Firefox/Safari. The export UI message is not proof of output correctness: no downloaded file was obtained for duration, dimensions, audio, sync, or title-pixel validation.
+
+### MEDIA-01 import/library verification
+
+**Implementation checks:** `npm test` passed **54/54** (timeline, schema/migrations/markers, storage, media validation, video/audio metadata timeouts, history, and title helpers); `npm run build` passed TypeScript and the Vite production build; `git diff --check` passed.
+
+**Browser:** Integrated VS Code browser, Electron 43.8.3 / Chromium 150.0.7871.250 on Windows. The QA run used synthetic in-memory files and a bounded Vite server; no repository files were changed, QA project records were removed, and the server was stopped.
+
+**Initial focused coverage:** 13 checks: 11 passed, 1 failed, 1 blocked. Synthetic WAV and PNG imported and appeared in the library with type/size and audio duration. Unsupported audio/visual extensions and conflicting MIME hints produced actionable feedback without altering existing project state. Corrupt PNG was rejected. Search filtered the library only; visual removal removed its clips and Undo restored them; soundtrack removal and Undo behaved as expected; Save/reload restored library entries and clip. The one UI gap—still image with no source-duration note—was corrected to display source duration N/A because images do not have intrinsic media duration. A synthetic `.webm` did not load, but that fixture was not known-decoded, so this is not evidence of valid video compatibility.
+
+**Retest after fixes:** 6 checks passed: malformed `.webm` rejection completed in 312 ms, loading cleared, an actionable error appeared, existing soundtrack/image/clip remained, one created object URL was revoked, still source duration showed N/A, and search/remove/undo still worked. This malformed fixture triggered the browser decode-error event promptly, so the real-browser 12-second no-event timeout path was **not** exercised; its timeout/cleanup behavior is covered by unit tests. Audio metadata now has the same 12-second bound, unit-tested for success/error/timeout; its no-event timeout was not forced in browser either. No valid decodable video fixture was available. Other target browsers were not tested.
+
+**MEDIA-01 status:** **IN_REVIEW**. The implemented import/library paths pass focused checks, but real decodable video formats and native browser behavior remain unverified. Extension/MIME acceptance is not a codec claim.
+
+### Latest automated validation
+
+On 2026-11-04, `npm test` passed **54/54** (0 failures) and `npm run build` passed TypeScript and the Vite production build. `git diff --check` passed.
+
+## PREV-01 focused preview synchronization follow-up
+
+**Implementation checks:** `npm test` passed **56/56** and `npm run build` passed. The preview keeps the existing 0.4-second playback correction tolerance and soundtrack master clock; it adds status feedback for video loading/error/playback rejection, pauses inactive layers, and distinguishes an empty project from a timeline gap/hidden video tracks. No frame-accuracy or cross-browser claim is made.
+
+**Browser:** Integrated VS Code browser, Electron 43.8.3 / Chromium 150.0.7871.250 on Windows; synthetic WAV and PNG fixtures; bounded Vite server stopped after QA. FFmpeg/FFprobe and a browser-decodable synthetic video fixture were unavailable.
+
+| Check | Result | Observation |
+|---|---|---|
+| Empty project vs. gap vs. hidden visual track | **PASS** | Empty project showed add-clips guidance; gaps and hidden tracks showed “No visible clips at this time.” |
+| Title-only preview | **PASS** | A title rendered when no visual clips were active. |
+| Overlapping image layers | **PASS** | Two image layers appeared; the higher visual track rendered above the lower one. |
+| Soundtrack play/pause/end | **PASS** | Audio advanced and paused at its 4-second end. This does not establish video playback behavior. |
+| Decode-error feedback | **PASS** | Invalid synthetic WebM was rejected with actionable import feedback. |
+| Paused video scrubbing/source mapping/clip switch | **BLOCKED** | No decodable video fixture was available. |
+| Active video leaves range and pauses | **BLOCKED** | Requires a decodable video fixture. |
+| Playback rejection retry and stale status clearing | **BLOCKED** | The browser page became inaccessible before this check; reopening showed no saved project. |
+
+**Run total:** 8 checks: 5 passed, 0 failed, 3 blocked. No confirmed product defect was observed. Video synchronization remains unverified; PREV-01 stays **IN_REVIEW**.
+
+**Latest automated validation:** `npm test` passed **56/56**, `npm run build` passed, and `git diff --check` passed.

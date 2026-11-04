@@ -45,6 +45,28 @@ export type TimelineClip = {
   transform: VisualTransform;
 };
 
+export type TimelineMarker = {
+  id: string;
+  time: number;
+  label: string;
+};
+
+export const MAX_TIMELINE_MARKER_TIME = 86_400;
+export const MAX_TIMELINE_MARKER_LABEL_LENGTH = 80;
+
+export function createTimelineMarker(
+  markers: TimelineMarker[],
+  time: number,
+  idFactory: () => string = () => globalThis.crypto?.randomUUID?.()
+    ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+): TimelineMarker {
+  return {
+    id: idFactory(),
+    time: Math.min(MAX_TIMELINE_MARKER_TIME, Math.max(0, Number.isFinite(time) ? time : 0)),
+    label: `Marker ${markers.length + 1}`,
+  };
+}
+
 export const defaultTransform: VisualTransform = {
   fit: 'cover',
   zoom: 1,

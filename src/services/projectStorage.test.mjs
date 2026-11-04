@@ -18,7 +18,7 @@ function project() {
     name: 'Recovery cut',
     createdAt: '2026-11-02T12:00:00.000Z',
     updatedAt: '2026-11-02T12:05:00.000Z',
-    schemaVersion: 3,
+    schemaVersion: 4,
     audio: { id: 'audio-1', fileName: 'track.wav', mimeType: 'audio/wav', size: 4, duration: 12 },
     assets: [{
       id: 'visual-1',
@@ -41,6 +41,7 @@ function project() {
       transform: { ...defaultTransform, rotation: 90 },
     }],
     titleOverlays: [],
+    markers: [{ id: 'marker-1', time: 4.5, label: 'Saved point' }],
     outputSettings: { presetId: 'custom', customWidth: 720, customHeight: 1280, frameRate: 30, format: 'WebM' },
   };
 }

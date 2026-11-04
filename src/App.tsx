@@ -4,10 +4,19 @@ import { CompositionPreview } from './components/CompositionPreview';
 import { ExportProgress } from './components/ExportProgress';
 import { TimelineEditor } from './components/TimelineEditor';
 import { TitleOverlayEditor } from './components/TitleOverlayEditor';
-import { buildOutputFileName, formatDuration, formatFileSize } from './services/media';
+import {
+  buildOutputFileName,
+  formatDuration,
+  formatFileSize,
+  getSupportedFormatsLabel,
+  validateMediaImport,
+  visualExtensions,
+} from './services/media';
 import { projectStorage, type ProjectSummary, type StoredProject } from './services/projectStorage';
 import type { ProjectDocument } from './services/project';
 import { MediaUrlRegistry } from './services/mediaUrlRegistry';
+import { waitForVideoMetadata } from './services/videoMetadata';
+import { waitForAudioMetadata } from './services/audioMetadata';
 import { createHistory, type History } from './services/history';
 import { getSupportedMimeType, renderVideo } from './services/videoExport';
 import { createDefaultTitle, type TitleOverlay } from './services/titleOverlay';
@@ -21,9 +30,11 @@ import {
   platformPresets,
   snapTimelinePosition,
   splitClipAtTimelineTime,
+  createTimelineMarker,
   type TimelineTrack,
   type TimelineAsset,
   type TimelineClip,
+  type TimelineMarker,
   type VisualTransform,
 } from './services/timeline';
 
@@ -37,6 +48,7 @@ type EditSnapshot = {
   tracks: TimelineTrack[];
   clips: TimelineClip[];
   titles: TitleOverlay[];
+  markers: TimelineMarker[];
   outputSettings: {
     presetId: string;
     customWidth: number;
@@ -46,8 +58,25 @@ type EditSnapshot = {
   };
 };
 
+type MediaLibraryItem = {
+  id: string;
+  file: File;
+  kind: 'audio' | 'image' | 'video';
+  duration: number;
+};
+
+const visualAccept = visualExtensions.map((extension) => `.${extension}`).join(',');
+
 function newId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(36).slice(2)}`;
+}
+
+function getMediaTypeLabel(file: File): string {
+  if (file.type) return file.type;
+  const extension = file.name.split('.').pop();
+  return extension && extension !== file.name
+    ? `.${extension.toUpperCase()} (MIME unavailable)`
+    : 'Unknown type';
 }
 
 function App() {
@@ -66,9 +95,11 @@ function App() {
   const [clips, setClips] = useState<TimelineClip[]>([]);
   const [tracks, setTracks] = useState<TimelineTrack[]>([defaultVideoTrack()]);
   const [titles, setTitles] = useState<TitleOverlay[]>([]);
+  const [markers, setMarkers] = useState<TimelineMarker[]>([]);
   const [selectedClipId, setSelectedClipId] = useState('');
   const [selectedTitleId, setSelectedTitleId] = useState('');
   const [currentTime, setCurrentTime] = useState(0);
+  const [previewSeekRevision, setPreviewSeekRevision] = useState(0);
   const [isPlaying, setIsPlaying] = useState(false);
   const [presetId, setPresetId] = useState('youtube');
   const [customWidth, setCustomWidth] = useState(1920);
@@ -78,6 +109,8 @@ function App() {
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
+  const [assetSearch, setAssetSearch] = useState('');
+  const [isImportingVisuals, setIsImportingVisuals] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportComplete, setExportComplete] = useState(false);
@@ -85,10 +118,13 @@ function App() {
   const mainRef = useRef<HTMLElement | null>(null);
   const exportButtonRef = useRef<HTMLButtonElement | null>(null);
   const wasExportingRef = useRef(false);
+  const visualImportRef = useRef(false);
   const urlsRef = useRef(new MediaUrlRegistry());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const startupRef = useRef(false);
   const historyRef = useRef<History<EditSnapshot> | null>(null);
+  const projectListRef = useRef(projectList);
+  projectListRef.current = projectList;
 
   const makeEditSnapshot = (overrides: Partial<EditSnapshot> = {}): EditSnapshot => ({
     audioFile,
@@ -97,6 +133,7 @@ function App() {
     tracks,
     clips,
     titles,
+    markers,
     outputSettings: { presetId, customWidth, customHeight, frameRate, format },
     ...overrides,
   });
@@ -145,6 +182,7 @@ function App() {
       ? current
       : (snapshot.titles[0]?.id ?? ''));
     setTitles(snapshot.titles);
+    setMarkers(snapshot.markers);
     setSelectedClipId((current) => snapshot.clips.some((clip) => clip.id === current)
       ? current
       : (snapshot.clips[0]?.id ?? ''));
@@ -176,6 +214,17 @@ function App() {
     fileSize: audioFile ? formatFileSize(audioFile.size) : '0 KB',
     detectedType: audioFile?.type || 'audio',
   };
+  const libraryItems: MediaLibraryItem[] = [
+    ...(audioFile ? [{ id: 'current-audio', file: audioFile, kind: 'audio' as const, duration: audioDuration }] : []),
+    ...assets.map((asset) => ({ id: asset.id, file: asset.file, kind: asset.kind, duration: asset.duration })),
+  ];
+  const normalizedAssetSearch = assetSearch.trim().toLocaleLowerCase();
+  const filteredLibraryItems = libraryItems.filter(({ file, kind }) => (
+    !normalizedAssetSearch
+    || file.name.toLocaleLowerCase().includes(normalizedAssetSearch)
+    || kind.includes(normalizedAssetSearch)
+    || (file.type || '').toLocaleLowerCase().includes(normalizedAssetSearch)
+  ));
 
   useEffect(() => () => urlsRef.current.clear(), []);
   useEffect(() => {
@@ -207,7 +256,7 @@ function App() {
     name: name.trim() || 'Untitled project',
     createdAt,
     updatedAt: new Date().toISOString(),
-    schemaVersion: 3,
+    schemaVersion: 4,
     audio: audioFile ? {
       id: `${id}-audio`,
       fileName: audioFile.name,
@@ -226,6 +275,7 @@ function App() {
     tracks,
     clips,
     titleOverlays: titles,
+    markers,
     outputSettings: {
       presetId,
       customWidth,
@@ -240,12 +290,15 @@ function App() {
     assets: Object.fromEntries(assets.map((asset) => [asset.id, asset.file])),
   });
 
-  const refreshProjectList = async () => {
+  const refreshProjectList = async (preferredProjectId?: string) => {
     const projects = await projectStorage.listProjects();
     setProjectList(projects);
-    setProjectToOpen((current) => current && projects.some((project) => project.id === current)
-      ? current
-      : (projects[0]?.id ?? ''));
+    setProjectToOpen((current) => {
+      const selectedId = preferredProjectId ?? current;
+      return selectedId && projects.some((project) => project.id === selectedId)
+        ? selectedId
+        : (projects[0]?.id ?? '');
+    });
   };
 
   const applyStoredProject = async (stored: StoredProject) => {
@@ -300,6 +353,7 @@ function App() {
       setTracks(documentValue.tracks);
       setClips(documentValue.clips);
       setTitles(documentValue.titleOverlays);
+      setMarkers(documentValue.markers);
       setSelectedClipId(documentValue.clips[0]?.id ?? '');
       setSelectedTitleId(documentValue.titleOverlays[0]?.id ?? '');
       setStep(documentValue.audio ? (documentValue.clips.length ? 3 : 2) : 1);
@@ -319,6 +373,7 @@ function App() {
         tracks: documentValue.tracks,
         clips: documentValue.clips,
         titles: documentValue.titleOverlays,
+        markers: documentValue.markers,
         outputSettings: { ...documentValue.outputSettings },
       });
     } catch (error) {
@@ -365,13 +420,15 @@ function App() {
   }, []);
 
   useEffect(() => {
-    if (!isProjectStorageReady || (!audioFile && !assets.length && !clips.length && !titles.length)) return;
+    const hasProjectContent = Boolean(audioFile || assets.length || clips.length || titles.length || markers.length);
+    const isExistingSavedProject = projectListRef.current.some((project) => project.id === projectId);
+    if (!isProjectStorageReady || (!hasProjectContent && !isExistingSavedProject)) return;
     const snapshot = makeProjectDocument();
     const media = makeProjectMedia();
     setProjectStorageStatus('Saving project locally…');
     const timer = window.setTimeout(() => {
       void projectStorage.saveProject(snapshot, media)
-        .then(refreshProjectList)
+        .then(() => refreshProjectList())
         .then(() => setProjectStorageStatus(`Saved “${snapshot.name}” in this browser.`))
         .catch((error: unknown) => setProjectStorageStatus(
           error instanceof Error ? error.message : 'Could not autosave. Your current edits are still open; use Save to retry.',
@@ -380,30 +437,38 @@ function App() {
     return () => window.clearTimeout(timer);
   }, [
     isProjectStorageReady, projectId, projectName, projectCreatedAt, audioFile, audioDuration,
-    assets, tracks, clips, titles, presetId, customWidth, customHeight, frameRate, format,
+    assets, tracks, clips, titles, markers, presetId, customWidth, customHeight, frameRate, format,
   ]);
 
-  const readAudioDuration = (file: File) => new Promise<number>((resolve) => {
+  const readAudioDuration = async (file: File) => {
     const url = urlsRef.current.create(file);
-    const audio = new Audio();
-    audio.preload = 'metadata';
-    const finish = (duration: number) => {
-      audio.onloadedmetadata = null;
-      audio.onerror = null;
+    try {
+      const audio = new Audio();
+      audio.preload = 'metadata';
+      return await waitForAudioMetadata(audio, url);
+    } finally {
       revokeUrl(url);
-      resolve(duration);
-    };
-    audio.onloadedmetadata = () => finish(Number.isFinite(audio.duration) ? audio.duration : 0);
-    audio.onerror = () => finish(0);
-    audio.src = url;
-  });
+    }
+  };
 
   const handleAudioSelect = async (file: File) => {
-    if (file.size === 0) {
-      setStatusMessage('This audio file is empty. Choose a valid audio file and try again.');
+    const validation = validateMediaImport(file, 'audio');
+    if (!validation.valid) {
+      setStatusMessage(validation.message);
       return;
     }
-    const duration = await readAudioDuration(file);
+    let duration: number;
+    try {
+      duration = await readAudioDuration(file);
+    } catch (error) {
+      const reason = error instanceof Error ? ` ${error.message}` : '';
+      setStatusMessage(`Could not read the duration of "${file.name}".${reason} Your existing soundtrack was kept.`);
+      return;
+    }
+    if (duration <= 0) {
+      setStatusMessage(`Could not read the duration of "${file.name}". This browser may not be able to decode this file. Your existing soundtrack was kept.`);
+      return;
+    }
     if (audioUrl) {
       audioRef.current?.pause();
       audioRef.current?.removeAttribute('src');
@@ -416,72 +481,112 @@ function App() {
     setAudioDuration(duration);
     recordEdit(makeEditSnapshot({ audioFile: file, audioDuration: duration }));
     setCurrentTime(0);
-    setStatusMessage(duration > 0 ? `Loaded ${file.name}` : 'Audio loaded, but its duration could not be read.');
+    setStatusMessage(`Loaded ${file.name}`);
+  };
+
+  const removeAudio = () => {
+    if (!audioFile) return;
+    audioRef.current?.pause();
+    audioRef.current?.removeAttribute('src');
+    audioRef.current?.load();
+    if (audioUrl) revokeUrl(audioUrl);
+    setAudioFile(null);
+    setAudioUrl(null);
+    setAudioDuration(0);
+    setCurrentTime(0);
+    setIsPlaying(false);
+    recordEdit(makeEditSnapshot({ audioFile: null, audioDuration: 0 }));
+    setStatusMessage('Soundtrack removed from this project. The original source file on your device was not deleted.');
   };
 
   const handleAddVisuals = async (fileList: FileList | null) => {
+    const files = Array.from(fileList ?? []);
+    if (!files.length || visualImportRef.current) return;
     if (!tracks.some((track) => !track.locked)) {
       setStatusMessage('Unlock a video track before adding visual clips.');
       if (fileInputRef.current) fileInputRef.current.value = '';
       return;
     }
-    const files = Array.from(fileList ?? []).filter((file) => file.size > 0);
-    const newAssets = await Promise.all(files.map(async (file): Promise<TimelineAsset | null> => {
-      const extension = file.name.split('.').pop()?.toLowerCase();
-      const isVideo = file.type.startsWith('video/') || ['mp4', 'mov', 'webm', 'm4v'].includes(extension ?? '');
-      const kind = isVideo ? 'video' : 'image';
-      const url = urlsRef.current.create(file);
-      const duration = kind === 'image' ? 5 : await new Promise<number>((resolve) => {
-        const video = document.createElement('video');
-        video.preload = 'metadata';
-        video.onloadedmetadata = () => resolve(Number.isFinite(video.duration) ? video.duration : 0);
-        video.onerror = () => resolve(0);
-        video.src = url;
+    visualImportRef.current = true;
+    setIsImportingVisuals(true);
+    const rejected: string[] = [];
+    try {
+      const eligibleFiles = files.filter((file) => {
+        const validation = validateMediaImport(file, 'visual');
+        if (!validation.valid) rejected.push(validation.message);
+        return validation.valid;
       });
-      if (kind === 'image') {
-        const image = new Image();
-        image.src = url;
-        try { await image.decode(); } catch {
+      const newAssets = await Promise.all(eligibleFiles.map(async (file): Promise<TimelineAsset | null> => {
+        const validation = validateMediaImport(file, 'visual');
+        if (!validation.valid || !validation.visualKind) return null;
+        const kind = validation.visualKind;
+        const url = urlsRef.current.create(file);
+        try {
+          const duration = kind === 'image' ? 5 : await (() => {
+            const video = document.createElement('video');
+            video.preload = 'metadata';
+            return waitForVideoMetadata(video, url);
+          })();
+          if (kind === 'image') {
+            const image = new Image();
+            image.src = url;
+            await image.decode();
+          }
+          return { id: newId(), file, url, kind, duration };
+        } catch (error) {
           revokeUrl(url);
+          if (kind === 'image') {
+            rejected.push(`Could not decode "${file.name}" in this browser.`);
+          } else {
+            const reason = error instanceof Error ? error.message : 'The browser could not read its metadata.';
+            rejected.push(`Could not import "${file.name}": ${reason} Check the file and try re-encoding it.`);
+          }
           return null;
         }
-      }
-      if (kind === 'video' && duration <= 0) {
-        revokeUrl(url);
-        return null;
-      }
-      return { id: newId(), file, url, kind, duration };
-    }));
-    const validAssets = newAssets.filter((asset): asset is TimelineAsset => Boolean(asset));
-    let appendAt = getTimelineDuration(clips);
-    const appendTrackId = tracks.find((track) => !track.locked)!.id;
-    const newClips = validAssets.map((asset): TimelineClip => {
-      const clip: TimelineClip = {
-        id: newId(),
-        assetId: asset.id,
-        trackId: appendTrackId,
-        timelinePosition: appendAt,
-        start: 0,
-        end: asset.kind === 'video' ? asset.duration : 0,
-        stillDuration: 5,
-        transition: 'none',
-        transform: { ...defaultTransform },
-      };
-      appendAt += getClipDuration(clip);
-      return clip;
-    });
-    setAssets((current) => [...current, ...validAssets]);
-    setClips((current) => [...current, ...newClips]);
-    if (newClips.length) {
-      recordEdit(makeEditSnapshot({
-        assets: [...assets, ...validAssets].map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
-        tracks,
-        clips: [...clips, ...newClips],
       }));
+      const validAssets = newAssets.filter((asset): asset is TimelineAsset => Boolean(asset));
+      let appendAt = getTimelineDuration(clips);
+      const appendTrackId = tracks.find((track) => !track.locked)!.id;
+      const newClips = validAssets.map((asset): TimelineClip => {
+        const clip: TimelineClip = {
+          id: newId(),
+          assetId: asset.id,
+          trackId: appendTrackId,
+          timelinePosition: appendAt,
+          start: 0,
+          end: asset.kind === 'video' ? asset.duration : 0,
+          stillDuration: 5,
+          transition: 'none',
+          transform: { ...defaultTransform },
+        };
+        appendAt += getClipDuration(clip);
+        return clip;
+      });
+      setAssets((current) => [...current, ...validAssets]);
+      setClips((current) => [...current, ...newClips]);
+      if (newClips.length) {
+        recordEdit(makeEditSnapshot({
+          assets: [...assets, ...validAssets].map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
+          tracks,
+          clips: [...clips, ...newClips],
+        }));
+      }
+      if (newClips.length) setSelectedClipId(newClips[0].id);
+      const rejectionSummary = rejected.length
+        ? ` ${rejected.slice(0, 3).join(' ')}${rejected.length > 3 ? ` ${rejected.length - 3} more file(s) were rejected.` : ''}`
+        : '';
+      setStatusMessage(validAssets.length
+        ? `Added ${validAssets.length} visual clip${validAssets.length === 1 ? '' : 's'}.${rejectionSummary}`
+        : `No visual files were added.${rejectionSummary || ' Choose a supported, decodable image or video file.'}`);
+    } catch (error) {
+      setStatusMessage(error instanceof Error
+        ? `Could not import visual media: ${error.message}`
+        : 'Could not import visual media. Try another supported file.');
+    } finally {
+      visualImportRef.current = false;
+      setIsImportingVisuals(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
     }
-    if (newClips.length) setSelectedClipId(newClips[0].id);
-    setStatusMessage(validAssets.length ? `Added ${validAssets.length} visual clip${validAssets.length === 1 ? '' : 's'}.` : 'No supported image or video files could be loaded.');
-    if (fileInputRef.current) fileInputRef.current.value = '';
   };
 
   const updateClip = (id: string, patch: Partial<TimelineClip>) => {
@@ -521,6 +626,25 @@ function App() {
     }));
     setSelectedClipId(nextClips[0]?.id ?? '');
     setStatusMessage('Clip removed from this project. The original source file on your device was not deleted.');
+  };
+
+  const removeVisualAsset = (assetId: string) => {
+    const asset = assets.find((item) => item.id === assetId);
+    if (!asset) return;
+    const nextAssets = assets.filter((item) => item.id !== assetId);
+    const nextClips = clips.filter((clip) => clip.assetId !== assetId);
+    setAssets(nextAssets);
+    setClips(nextClips);
+    if (selectedClipId && !nextClips.some((clip) => clip.id === selectedClipId)) {
+      setSelectedClipId(nextClips[0]?.id ?? '');
+    }
+    revokeUrl(asset.url);
+    recordEdit(makeEditSnapshot({
+      assets: nextAssets.map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
+      tracks,
+      clips: nextClips,
+    }));
+    setStatusMessage(`Removed "${asset.file.name}" and its clips from this project. The original source file on your device was not deleted.`);
   };
 
   const handleSplit = (id: string) => {
@@ -624,6 +748,27 @@ function App() {
     recordEdit(makeEditSnapshot({ titles: nextTitles }));
   };
 
+  const addMarker = () => {
+    const marker = createTimelineMarker(markers, currentTime, newId);
+    const nextMarkers = [...markers, marker];
+    setMarkers(nextMarkers);
+    recordEdit(makeEditSnapshot({ markers: nextMarkers }));
+  };
+
+  const renameMarker = (id: string, label: string) => {
+    const nextMarkers = markers.map((marker) => marker.id === id ? { ...marker, label } : marker);
+    if (nextMarkers.every((marker, index) => marker === markers[index])) return;
+    setMarkers(nextMarkers);
+    recordEdit(makeEditSnapshot({ markers: nextMarkers }));
+  };
+
+  const removeMarker = (id: string) => {
+    const nextMarkers = markers.filter((marker) => marker.id !== id);
+    if (nextMarkers.length === markers.length) return;
+    setMarkers(nextMarkers);
+    recordEdit(makeEditSnapshot({ markers: nextMarkers }));
+  };
+
   useEffect(() => {
     const handleHistoryShortcut = (event: KeyboardEvent) => {
       if (isExporting || (!event.ctrlKey && !event.metaKey) || event.altKey) return;
@@ -662,6 +807,7 @@ function App() {
     setTracks([defaultVideoTrack()]);
     setClips([]);
     setTitles([]);
+    setMarkers([]);
     setSelectedClipId('');
     setSelectedTitleId('');
     setCurrentTime(0);
@@ -678,6 +824,7 @@ function App() {
       tracks: [defaultVideoTrack()],
       clips: [],
       titles: [],
+      markers: [],
       outputSettings: { presetId: 'youtube', customWidth: 1920, customHeight: 1080, frameRate: 30, format: 'MP4' },
     });
     setStatusMessage('');
@@ -719,7 +866,7 @@ function App() {
       setProjectName(name);
       setProjectCreatedAt(createdAt);
       resetEditHistory(makeEditSnapshot());
-      await refreshProjectList();
+      await refreshProjectList(id);
       setProjectStorageStatus(`Saved a separate copy named “${name}”.`);
     } catch (error) {
       setProjectStorageStatus(error instanceof Error ? error.message : 'Could not save a copy. Your current edits are still open.');
@@ -809,6 +956,65 @@ function App() {
     setIsPlaying((playing) => !playing);
   };
 
+  const mediaLibrary = (
+    <section aria-labelledby="asset-library-heading" className="border border-neutral-200 bg-white/70 p-4">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 id="asset-library-heading" className="text-sm font-semibold">Media library</h3>
+          <p className="mt-1 text-xs text-neutral-500">Project references only; removing media here does not delete original files.</p>
+        </div>
+        <span className="text-xs text-neutral-500">{libraryItems.length} item{libraryItems.length === 1 ? '' : 's'}</span>
+      </div>
+      <label htmlFor="asset-library-search" className="mt-3 block text-xs font-medium text-neutral-600">
+        Search media
+        <input
+          id="asset-library-search"
+          type="search"
+          value={assetSearch}
+          onChange={(event) => setAssetSearch(event.target.value)}
+          placeholder="Search name or type"
+          className="mt-1 w-full border border-neutral-200 bg-white px-3 py-2 text-sm text-ink"
+        />
+      </label>
+      <p className="mt-1 text-[11px] text-neutral-500">Search filters this list only.</p>
+      {isImportingVisuals && <p role="status" className="mt-3 text-xs text-neutral-600">Importing visual media…</p>}
+      {!libraryItems.length ? (
+        <p className="mt-4 border-t border-neutral-200 pt-3 text-sm text-neutral-500">No media in this project yet.</p>
+      ) : !filteredLibraryItems.length ? (
+        <p className="mt-4 border-t border-neutral-200 pt-3 text-sm text-neutral-500">No media matches “{assetSearch}”.</p>
+      ) : (
+        <ul className="mt-3 divide-y divide-neutral-200 border-t border-neutral-200">
+          {filteredLibraryItems.map((item) => (
+            <li key={item.id} className="flex min-w-0 items-center gap-3 py-3">
+              <span aria-hidden="true" className="grid h-9 w-9 shrink-0 place-items-center bg-lime/40 text-sm font-semibold text-moss">
+                {item.kind === 'audio' ? '♫' : item.kind === 'video' ? '▶' : '▧'}
+              </span>
+              <div className="min-w-0 flex-1">
+                <p className="truncate text-sm font-medium" title={item.file.name}>{item.file.name || 'Unnamed media file'}</p>
+                <p className="mt-1 break-all text-[11px] text-neutral-500">
+                  {item.kind === 'audio' ? 'Soundtrack' : item.kind === 'image' ? 'Image' : 'Video'}
+                  {' · '}{getMediaTypeLabel(item.file)}{' · '}{formatFileSize(item.file.size)}
+                  {item.kind === 'image'
+                    ? ' · source duration N/A (still image)'
+                    : item.duration > 0 ? ` · ${formatDuration(item.duration)}` : ''}
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => item.kind === 'audio' ? removeAudio() : removeVisualAsset(item.id)}
+                disabled={isExporting || isImportingVisuals}
+                aria-label={`Remove ${item.kind === 'audio' ? 'soundtrack' : 'visual asset'} ${item.file.name} from project`}
+                className="shrink-0 border border-neutral-200 px-3 py-2 text-xs font-medium text-neutral-700 hover:border-red-300 hover:text-red-800 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Remove
+              </button>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+
   return (
     <div className="min-h-screen bg-paper text-ink">
       <header className="mx-auto flex max-w-[1500px] items-center justify-between border-b border-neutral-200 px-5 py-4 md:px-10">
@@ -826,7 +1032,7 @@ function App() {
             maxLength={100}
             value={projectName}
             onChange={(event) => setProjectName(event.target.value)}
-            disabled={isExporting}
+            disabled={isExporting || isImportingVisuals}
           />
         </label>
         <label className="block text-xs font-medium text-neutral-600">
@@ -836,20 +1042,20 @@ function App() {
             aria-label="Saved projects"
             value={projectToOpen}
             onChange={(event) => setProjectToOpen(event.target.value)}
-            disabled={!projectList.length || isExporting}
+            disabled={!projectList.length || isExporting || isImportingVisuals}
           >
             {!projectList.length && <option value="">No saved projects yet</option>}
             {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}{project.problem ? ' · needs attention' : ''}</option>)}
           </select>
         </label>
         <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => void handleSaveProject()} disabled={isExporting || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save</button>
-          <button type="button" onClick={() => void handleSaveAs()} disabled={isExporting || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save as</button>
-          <button type="button" onClick={() => void startNewVideo()} disabled={isExporting || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">New</button>
-          <button type="button" onClick={() => void handleOpenProject()} disabled={!projectToOpen || isExporting} className="bg-moss px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">Open</button>
-          <button type="button" onClick={() => void handleDeleteProject()} disabled={!projectToOpen || isExporting} className="border border-red-200 px-3 py-2 text-xs font-semibold text-red-800 disabled:opacity-40">Delete</button>
-          <button type="button" onClick={undoEdit} disabled={!canUndo || isExporting} aria-label="Undo last edit" aria-keyshortcuts="Control+Z Meta+Z" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Undo</button>
-          <button type="button" onClick={redoEdit} disabled={!canRedo || isExporting} aria-label="Redo last edit" aria-keyshortcuts="Control+Shift+Z Meta+Shift+Z Control+Y Meta+Y" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Redo</button>
+          <button type="button" onClick={() => void handleSaveProject()} disabled={isExporting || isImportingVisuals || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save</button>
+          <button type="button" onClick={() => void handleSaveAs()} disabled={isExporting || isImportingVisuals || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save as</button>
+          <button type="button" onClick={() => void startNewVideo()} disabled={isExporting || isImportingVisuals || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">New</button>
+          <button type="button" onClick={() => void handleOpenProject()} disabled={!projectToOpen || isExporting || isImportingVisuals} className="bg-moss px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">Open</button>
+          <button type="button" onClick={() => void handleDeleteProject()} disabled={!projectToOpen || isExporting || isImportingVisuals} className="border border-red-200 px-3 py-2 text-xs font-semibold text-red-800 disabled:opacity-40">Delete</button>
+          <button type="button" onClick={undoEdit} disabled={!canUndo || isExporting || isImportingVisuals} aria-label="Undo last edit" aria-keyshortcuts="Control+Z Meta+Z" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Undo</button>
+          <button type="button" onClick={redoEdit} disabled={!canRedo || isExporting || isImportingVisuals} aria-label="Redo last edit" aria-keyshortcuts="Control+Shift+Z Meta+Shift+Z Control+Y Meta+Y" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Redo</button>
         </div>
         <div className="md:col-span-3">
           <p role="status" aria-live="polite" className="text-xs text-neutral-600">{projectStorageStatus}</p>
@@ -866,7 +1072,7 @@ function App() {
           <nav aria-label="Creation steps" className="flex items-center gap-2">
             {steps.map((label, index) => {
               const number = index + 1;
-              return <button key={label} type="button" onClick={() => number < step && setStep(number)} disabled={number > step} aria-label={`Step ${number}: ${label}`} aria-current={number === step ? 'step' : undefined} className={`flex items-center gap-2 border-b-2 px-2 py-3 text-xs ${number === step ? 'border-moss font-semibold text-ink' : 'border-transparent text-neutral-400'} disabled:cursor-default`}>
+              return <button key={label} type="button" onClick={() => number < step && setStep(number)} disabled={number > step || isImportingVisuals} aria-label={`Step ${number}: ${label}`} aria-current={number === step ? 'step' : undefined} className={`flex items-center gap-2 border-b-2 px-2 py-3 text-xs ${number === step ? 'border-moss font-semibold text-ink' : 'border-transparent text-neutral-400'} disabled:cursor-default`}>
                 <span className={`grid h-6 w-6 place-items-center rounded-full text-[10px] ${stepsComplete[index] ? 'bg-moss text-white' : number === step ? 'bg-lime text-ink' : 'bg-neutral-200 text-neutral-500'}`}>{stepsComplete[index] ? '✓' : `0${number}`}</span>
                 <span className="hidden sm:inline">{label}</span>
               </button>;
@@ -880,6 +1086,7 @@ function App() {
             <p className="mt-2 text-sm text-neutral-500">Add one audio track. It sets the finished video's duration.</p>
           </div>
           <AudioUploader onFileSelect={handleAudioSelect} fileName={audioMeta.fileName} fileSize={audioMeta.fileSize} detectedType={audioMeta.detectedType} duration={audioDuration} />
+          <p className="mt-2 text-xs text-neutral-500">A listed filename extension does not guarantee that this browser can decode the file.</p>
           {audioFile && <div className="mt-5 flex items-center justify-between border-b border-neutral-200 py-4 text-sm">
             <div className="min-w-0"><p className="truncate font-medium">{audioFile.name}</p><p className="mt-1 text-xs text-neutral-500">{formatDuration(audioDuration)} · {audioMeta.fileSize}</p></div>
             <button type="button" className="text-xs font-medium text-moss underline underline-offset-4" onClick={() => document.getElementById('audio-upload')?.click()}>Replace audio</button>
@@ -891,25 +1098,27 @@ function App() {
         {step === 2 && <section className="mx-auto max-w-3xl border-t border-neutral-200 py-8">
           <div className="mb-8 flex items-end justify-between gap-4">
             <div><h2 className="text-xl font-semibold">Add visual media</h2><p className="mt-2 text-sm text-neutral-500">Add images and video clips. Video source audio is automatically excluded.</p></div>
-            <button type="button" onClick={() => fileInputRef.current?.click()} className="shrink-0 bg-moss px-4 py-3 text-sm font-semibold text-white">+ Add media</button>
+            <button type="button" onClick={() => fileInputRef.current?.click()} disabled={isImportingVisuals} className="shrink-0 bg-moss px-4 py-3 text-sm font-semibold text-white disabled:opacity-50">{isImportingVisuals ? 'Importing…' : '+ Add media'}</button>
           </div>
-          <input ref={fileInputRef} className="sr-only" type="file" multiple accept="image/*,video/mp4,video/quicktime,video/webm" onChange={(event) => void handleAddVisuals(event.target.files)} />
+          <input ref={fileInputRef} className="sr-only" type="file" multiple accept={visualAccept} onChange={(event) => void handleAddVisuals(event.target.files)} />
           <div onDragOver={(event) => event.preventDefault()} onDrop={(event) => { event.preventDefault(); void handleAddVisuals(event.dataTransfer.files); }} className="border border-dashed border-neutral-300 bg-white/70 p-6 text-center text-sm text-neutral-500">
-            Drop image or video files here, or choose Add media above.
+            <p>Drop image or video files here, or choose Add media above.</p>
+            <p className="mt-2 text-xs">Supported filename extensions: {getSupportedFormatsLabel('visual')}</p>
           </div>
+          <div className="mt-5">{mediaLibrary}</div>
           <div className="mt-6 divide-y divide-neutral-200 border-y border-neutral-200">
             {clips.map((clip) => {
               const asset = assets.find((item) => item.id === clip.assetId);
               return <div key={clip.id} className="flex items-center gap-3 py-3">
                 {asset?.kind === 'image' ? <img src={asset.url} className="h-14 w-20 object-cover" alt="" /> : <video src={asset?.url} muted className="h-14 w-20 object-cover" />}
                 <div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{asset?.file.name}</p><p className="mt-1 text-xs text-neutral-500">{asset?.kind === 'image' ? 'Still image' : 'Video clip'} · {getClipDuration(clip).toFixed(1)} sec</p></div>
-                <button type="button" title="Remove clip" aria-label="Remove clip" onClick={() => removeClip(clip.id)} className="px-2 py-2 text-neutral-500">×</button>
+                <button type="button" title="Remove clip" aria-label="Remove clip" onClick={() => removeClip(clip.id)} disabled={isImportingVisuals} className="px-2 py-2 text-neutral-500 disabled:cursor-not-allowed disabled:opacity-40">×</button>
               </div>;
             })}
             {!clips.length && <p className="py-10 text-center text-sm text-neutral-500">Your sequence is empty.</p>}
           </div>
           {statusMessage && <p role="status" className="mt-4 text-sm text-neutral-600">{statusMessage}</p>}
-          <div className="mt-8 flex justify-between"><button type="button" onClick={() => setStep(1)} className="px-1 py-3 text-sm text-neutral-600">← Back</button><button type="button" onClick={() => setStep(3)} disabled={!canContinue} className="bg-moss px-5 py-3 text-sm font-semibold text-white disabled:opacity-40">Continue to editor <span aria-hidden="true">→</span></button></div>
+          <div className="mt-8 flex justify-between"><button type="button" onClick={() => setStep(1)} disabled={isImportingVisuals} className="px-1 py-3 text-sm text-neutral-600 disabled:opacity-40">← Back</button><button type="button" onClick={() => setStep(3)} disabled={!canContinue || isImportingVisuals} className="bg-moss px-5 py-3 text-sm font-semibold text-white disabled:opacity-40">Continue to editor <span aria-hidden="true">→</span></button></div>
         </section>}
 
         {step === 3 && <section className="space-y-7 border-t border-neutral-200 pt-6">
@@ -919,10 +1128,10 @@ function App() {
           </div>
           <div className="grid items-start gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(390px,0.9fr)]">
             <div className="space-y-4">
-              <CompositionPreview assets={assets} tracks={tracks} clips={clips} titles={titles} currentTime={currentTime} isPlaying={isPlaying} width={width} height={height} />
+              <CompositionPreview assets={assets} tracks={tracks} clips={clips} titles={titles} currentTime={currentTime} isPlaying={isPlaying} seekRevision={previewSeekRevision} width={width} height={height} />
               <div className="flex items-center gap-4 border-b border-neutral-200 pb-4">
                 <button type="button" onClick={playPause} className="grid h-10 w-10 shrink-0 place-items-center bg-ink text-white" aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>{isPlaying ? 'Ⅱ' : '▶'}</button>
-                <div className="min-w-0 flex-1"><input aria-label="Preview position" type="range" min="0" max={Math.max(audioDuration, 0.1)} step="0.1" value={clampTimelineTime(currentTime, audioDuration)} onChange={(event) => { const time = clampTimelineTime(Number(event.target.value), audioDuration); setCurrentTime(time); if (audioRef.current) audioRef.current.currentTime = time; }} className="w-full accent-moss" /><div className="flex justify-between text-[11px] tabular-nums text-neutral-500"><span>{formatDuration(clampTimelineTime(currentTime, audioDuration))}</span><span>{formatDuration(audioDuration)}</span></div></div>
+                <div className="min-w-0 flex-1"><input aria-label="Preview position" type="range" min="0" max={Math.max(audioDuration, 0.1)} step="0.1" value={clampTimelineTime(currentTime, audioDuration)} onChange={(event) => { const time = clampTimelineTime(Number(event.target.value), audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(time); if (audioRef.current) audioRef.current.currentTime = time; }} className="w-full accent-moss" /><div className="flex justify-between text-[11px] tabular-nums text-neutral-500"><span>{formatDuration(clampTimelineTime(currentTime, audioDuration))}</span><span>{formatDuration(audioDuration)}</span></div></div>
               </div>
             </div>
             <aside className="space-y-5">
@@ -947,11 +1156,12 @@ function App() {
                 tracks={tracks}
                 clips={clips}
                 titles={titles}
+                markers={markers}
                 selectedTitleId={selectedTitleId}
                 selectedClipId={selectedClipId}
                 currentTime={currentTime}
                 soundtrackDuration={audioDuration}
-                onSeek={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
+                onSeek={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
                 onAddTrack={addTrack}
                 onTrackChange={updateTrack}
                 onMoveClip={moveClipToTrack}
@@ -962,7 +1172,10 @@ function App() {
                 onSplit={handleSplit}
                 onDuplicate={duplicateClip}
                 onSelectTitle={setSelectedTitleId}
-                onSeekTitle={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
+                onSeekTitle={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
+                onAddMarker={addMarker}
+                onRenameMarker={renameMarker}
+                onRemoveMarker={removeMarker}
               />
               <TitleOverlayEditor
                 titles={titles}
@@ -972,6 +1185,7 @@ function App() {
                 onChange={updateTitle}
                 onRemove={removeTitle}
               />
+              {mediaLibrary}
             </aside>
           </div>
           <div className="flex flex-wrap items-center justify-between gap-4 border-t border-neutral-200 pt-5">

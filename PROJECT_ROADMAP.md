@@ -1,7 +1,7 @@
 # Project Roadmap
 
 **Planning basis:** `PROJECT_SPEC.md` in full, current repository evidence, and read-only Backend/Frontend assessments.
-**Status (2026-11-02):** FDN-01 and DATA-01 are complete. DATA-02 passed focused integrated Chromium verification (7/7) and remains in review pending native-browser/natural storage-failure coverage. HIST-01 is implemented and passed 12 integrated-browser cases; automated tests pass 28/28 and the production build passes. QA-01 and PROD-01 remain partial; TIME-01 multi-track work is next.
+**Status (2026-11-04):** FDN-01 and DATA-01 are complete; the project schema is now v4 with title and marker data plus v1-v3 migration. DATA-02's Save As selector issue was fixed and passed a focused 4/4 Chromium retest; native-browser and natural quota/eviction coverage remain open. HIST-01 passed 12 integrated-browser cases. Persistent markers passed 8/8 focused browser scenarios. MEDIA-01 now includes import extension/MIME checks, bounded audio/video metadata waits, and a searchable current-project library; focused QA verified common supported-file checks, safe remove/undo, persistence, and malformed-media errors, but valid video/native-browser compatibility remains open. PREV-01 now includes improved video status/gap feedback; focused QA passed 5 checks and blocked 3 video-specific scenarios due to missing decodable test media and browser page access. Automated tests pass 56/56 and the production build passes. QA-01 and PROD-01 remain partial; multi-audio, persisted export validation, native browsers, and several commercial/product decisions remain unresolved.
 
 ## Product and technical direction
 
@@ -38,7 +38,7 @@ The current application has no backend. User decisions are to retain React, targ
 
 **Scope:** Restore a reproducible build; establish test ownership and regression evidence; decide supported browsers and persistence/distribution scope; record current export behavior and failure limits.
 
-**Current checkpoint (2026-11-02):** FDN-01 is **complete and verified**. QA-01 remains **in progress**: 15 baseline cases yielded 10 pass, 1 fail (the preview in-point bug was subsequently verified fixed in 9/9 retests), 1 blocked, and 3 not tested; downloaded-file inspection and native-browser workflow/export validation remain outstanding. PROD-01 has partial decisions (React, browser-local IndexedDB defaults, desktop Chrome/Edge/Firefox/Safari) but minimum versions/OS, media limits, availability, and commercial scope remain open. DATA-01 is complete. DATA-02 passed 7/7 focused integrated Chromium cases and HIST-01 passed 12 scoped cases; neither constitutes a cross-browser/export release assessment.
+**Current checkpoint (2026-11-04):** FDN-01 is **complete and verified**. QA-01 remains **in progress**: the Nov 4 integrated-browser pass ran 16 checks (12 pass, 1 initial failure fixed and retested, 3 blocked); downloaded-file inspection and native-browser workflow/export validation remain outstanding. PROD-01 has partial decisions (React, browser-local IndexedDB defaults, desktop Chrome/Edge/Firefox/Safari) but minimum versions/OS, media limits, availability, and commercial scope remain open. DATA-01 is complete. DATA-02's focused Save As retest passed 4/4; TIME-02 markers passed 8/8 integrated Chromium scenarios. These do not constitute a cross-browser/export release assessment.
 
 **Acceptance criteria**
 
@@ -73,6 +73,10 @@ IndexedDB stores validated project metadata and the project's audio/visual sourc
 ### Phase 3 — Core Editing and Preview — **P1**
 
 **Scope:** Multi-track timeline foundations, accurate clip operations, track controls, snapping/markers as prioritized, and preview synchronization against the project model.
+
+**Implementation update (2026-11-04):** Visual multi-track foundations and persistent global timeline markers are implemented. Marker add/seek/rename/delete, undo/redo, save/reload, and open passed 8/8 integrated Chromium scenarios; project schema v4 migrates existing v1-v3 documents. Multiple audio tracks are not implemented, and track-control, native-browser, and downloaded-export acceptance remains open.
+
+**Adjacent media-library increment (2026-11-04):** MEDIA-01 now has local import validation, bounded audio/video metadata reads, and searchable current-project asset listing with safe removal/history. It remains in review pending valid video-decoder and native-browser checks.
 
 **Acceptance criteria**
 
@@ -151,4 +155,4 @@ IndexedDB stores validated project metadata and the project's audio/visual sourc
 
 ## Task tracking
 
-`TASKS.md` is the actionable backlog and source of task-level dependencies, ownership, status, deliverables, and acceptance criteria. All feature implementation tasks remain **PENDING**; Phase 0 discovery itself is complete.
+`TASKS.md` is the actionable backlog and source of task-level dependencies, ownership, status, deliverables, and acceptance criteria. Foundation/model/history work is complete or in review; visual timeline operations, markers, and static titles are implemented with bounded Chromium evidence but still have explicit acceptance gaps. Rendering, richer audio/media workflows, marketing, and release tasks remain pending or gated by dependencies/product decisions. Phase 0 discovery itself is complete; the full product is not release-ready.

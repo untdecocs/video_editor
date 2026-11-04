@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import {
   clampTimelineTime,
+  createTimelineMarker,
   defaultTransform,
   duplicateTimelineClip,
   getClipDuration,
@@ -16,7 +17,12 @@ import {
   splitClip,
   splitClipAtTimelineTime,
 } from './timeline.ts';
-import { shouldSeekPreviewVideo } from './videoPreview.ts';
+import {
+  getPreviewPlaybackRejectionStatus,
+  getPreviewVideoFailureStatus,
+  getPreviewVideoStatusMessage,
+  shouldSeekPreviewVideo,
+} from './videoPreview.ts';
 
 const videoClip = (id, start = 0, end = 10) => ({
   id,
@@ -49,6 +55,13 @@ test('clamps timeline seeks to the soundtrack playback boundary without changing
   assert.equal(clampTimelineTime(4, Number.NaN), 0);
   assert.equal(getTimelineDuration([clip]), 20);
   assert.deepEqual(clip, originalClip);
+});
+
+test('creates a stable marker model with a default label and bounded playhead time', () => {
+  const marker = createTimelineMarker([], 8.25, () => 'marker-stable');
+  assert.deepEqual(marker, { id: 'marker-stable', time: 8.25, label: 'Marker 1' });
+  assert.equal(createTimelineMarker([marker], -2, () => 'marker-two').time, 0);
+  assert.equal(createTimelineMarker([marker], 90_000, () => 'marker-three').time, 86_400);
 });
 
 test('snaps clip positions deterministically while keeping an explicit unsnapped path', () => {
@@ -88,6 +101,17 @@ test('maps overlaps to absolute time, respects visibility, and layers in track o
   assert.deepEqual(getActiveClips(tracks, clips, 6).map(({ clip }) => clip.id), ['overlay']);
   assert.equal(locateClipAtTime(clips, 4).clip.id, 'overlay');
   assert.equal(getClipSourceTime(clips[0], 4), 2);
+});
+
+test('maps timeline time into the clip source range and uses inclusive start, exclusive end boundaries', () => {
+  const clip = { ...videoClip('mapped', 3, 9), timelinePosition: 12 };
+  const tracks = [{ id: 'track-a', name: 'Video', order: 0, visible: true, locked: false }];
+
+  assert.deepEqual(getActiveClips(tracks, [clip], 11.999), []);
+  assert.deepEqual(getActiveClips(tracks, [clip], 12).map(({ clip: activeClip }) => activeClip.id), ['mapped']);
+  assert.equal(getClipSourceTime(clip, 12), 3);
+  assert.equal(getClipSourceTime(clip, 15.5), 6.5);
+  assert.deepEqual(getActiveClips(tracks, [clip], 18), []);
 });
 
 test('moves a clip without mutating the original list', () => {
@@ -170,4 +194,14 @@ test('retains the playback drift threshold but forces seeks after paused scrubs'
   assert.equal(shouldSeekPreviewVideo(0, 0.4), false);
   assert.equal(shouldSeekPreviewVideo(0, 0.5), true);
   assert.equal(shouldSeekPreviewVideo(0, 0.2, true), true);
+});
+
+test('classifies preview loading, decode, unavailable, and playback-blocked feedback', () => {
+  assert.equal(getPreviewVideoStatusMessage('loading'), 'Loading video preview…');
+  assert.equal(getPreviewVideoFailureStatus(3), 'decode-error');
+  assert.equal(getPreviewVideoStatusMessage(getPreviewVideoFailureStatus(3)), 'This video could not be decoded.');
+  assert.equal(getPreviewVideoFailureStatus(4), 'unavailable');
+  assert.equal(getPreviewPlaybackRejectionStatus('NotAllowedError'), 'playback-blocked');
+  assert.equal(getPreviewPlaybackRejectionStatus('AbortError'), null);
+  assert.equal(getPreviewVideoStatusMessage('ready'), null);
 });
