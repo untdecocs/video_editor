@@ -18,7 +18,7 @@ function project() {
     name: 'Recovery cut',
     createdAt: '2026-11-02T12:00:00.000Z',
     updatedAt: '2026-11-02T12:05:00.000Z',
-    schemaVersion: 4,
+    schemaVersion: 5,
     audio: { id: 'audio-1', fileName: 'track.wav', mimeType: 'audio/wav', size: 4, duration: 12 },
     assets: [{
       id: 'visual-1',
@@ -37,6 +37,7 @@ function project() {
       start: 0,
       end: 0,
       stillDuration: 7,
+      stillDurationMode: 'custom',
       transition: 'fade',
       transform: { ...defaultTransform, rotation: 90 },
     }],

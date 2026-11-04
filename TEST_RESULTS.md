@@ -420,3 +420,57 @@ On 2026-11-04, `npm test` passed **54/54** (0 failures) and `npm run build` pass
 **Run total:** 8 checks: 5 passed, 0 failed, 3 blocked. No confirmed product defect was observed. Video synchronization remains unverified; PREV-01 stays **IN_REVIEW**.
 
 **Latest automated validation:** `npm test` passed **56/56**, `npm run build` passed, and `git diff --check` passed.
+
+## PREV-01 decodable-video synchronization retest
+
+**Run date:** 2026-11-04
+
+**Environment:** Integrated VS Code browser, VS Code 1.145.0, Electron 43.8.3 / Chromium 150.0.7871.250 on Windows (`Win32`; exact OS build unknown); Node v24.12.0. Vite was started on localhost for this bounded test and stopped afterward.
+
+**Synthetic fixtures:** A four-second mono 22,050 Hz WAV and a 320×180 synthetic PNG were created in memory. The app renderer exported and Chromium decoded a 61,367-byte `video/mp4;codecs=avc1.42e01e,mp4a.40.2` Blob, duration 4.034767 seconds, at 320×180. That Blob was re-imported into the editor as the video source. The fixture is valid for this browser but is renderer-derived and visually static; it is not an independently encoded moving-video or codec-compatibility fixture. An attempted direct Canvas/MediaRecorder WebM fixture failed Chromium demuxing and was discarded, not counted as an app defect.
+
+| Test ID | Check | Observed result | Status |
+|---|---|---|---|
+| PREV-SYN-001 | Load the generated MP4 and set source In=0.5, Out=3.5 while paused at project time 0. | Metadata loaded (`readyState=4`); video duration was 4.034767 seconds. Preview source `currentTime` became 0.5 seconds and stayed paused. | **PASS** |
+| PREV-SYN-002 | Seek the preview timeline to 1.2 seconds with source In=0.5. | Audio currentTime was 1.2 seconds and video currentTime was 1.7 seconds, matching source In + project time. | **PASS** |
+| PREV-SYN-003 | Play from project time 0 and sample audio/video clocks. | At the observation, audio was 0.792233 seconds and video was 1.197904 seconds. Video was actively playing; observed video-audio offset was 0.405671 seconds versus the expected 0.5-second source offset (94 ms behind). | **PASS (observed sample; no project sync tolerance is defined)** |
+| PREV-SYN-004 | Repeat a playback sample after seeking within the clip. | Audio was 1.885990 seconds and video was 2.308248 seconds. Observed offset was 0.422258 seconds (78 ms behind the expected 0.5-second source offset). | **PASS (observed sample; no project sync tolerance is defined)** |
+| PREV-SYN-005 | Seek beyond the trimmed clip range to project time 3.2 seconds. | The clip ended at project time 3.0; preview showed the gap message and had no active video element. | **PASS** |
+| PREV-SYN-006 | Play across the trimmed clip's out-point. | Starting near 2.8 seconds, audio advanced to 3.361420 seconds; the ended video was no longer active and the preview showed the gap state. | **PASS** |
+| PREV-SYN-007 | Import a deliberately malformed MP4 while the valid video is already in the project. | The app displayed actionable decode-error feedback and retained the existing valid media and clip. | **PASS** |
+| PREV-SYN-008 | Retry with the valid generated MP4 after the decode error. | The valid video imported; the previous error status cleared and the new clip appeared. | **PASS** |
+
+**Run total:** 8 checks: 8 passed, 0 failed, 0 blocked. The project was a temporary synthetic test project and was deleted after the run; no source files were created in the repository. No application code was changed.
+
+**Assessment:** This closes the previously blocked basic browser checks for paused source mapping, playback sampling, clip-range exit, and decode-error/retry status in this integrated Chromium environment. The two measured playback samples were 78–94 ms behind the expected 0.5-second source offset; no product sync tolerance has been approved, so this is evidence rather than a frame-accuracy or cross-browser guarantee. A renderer-derived static fixture does not establish synchronization with independently encoded moving video. Native Chrome/Edge/Firefox/Safari, audio/video sync over longer playback, and downloaded-export inspection remain open; PREV-01 and QA-01 remain **IN_REVIEW**.
+
+**Final validation after this retest:** `npm test` and `npm run build` are recorded below after the documentation update; the Vite server was stopped at test completion.
+
+## TIME-02 soundtrack-aware still durations
+
+**Run date:** 2026-11-04
+**Environment:** Windows 10, integrated Chromium/Chrome 150, React/Vite. The bounded Vite server was stopped after testing; port 5173 was verified clear.
+**Fixtures:** In-browser generated 40-second and 55-second WAV files plus a 160×100 PNG; no repository fixtures were created.
+
+| Test ID | Check | Observed result | Status |
+|---|---|---|---|
+| TIME02-STILL-001 | With no soundtrack, verify a still remains usable and Match soundtrack is unavailable. | Match soundtrack was disabled; switching to Custom and entering 12.5 seconds updated the still duration. | **PASS** |
+| TIME02-STILL-002 | With 40s audio, choose Match soundtrack. | The still duration became 40.0 seconds. | **PASS** |
+| TIME02-STILL-003 | Set Custom duration to 45 seconds. | The numeric field accepted 45 (maximum 86,400); timeline showed 45.0 seconds, with no 30-second clamp. | **PASS** |
+| TIME02-STILL-004 | Replace audio with 55s audio in Custom mode, then choose Match. | Custom remained 45 seconds after replacement; Match updated it to 55.0 seconds. | **PASS** |
+| TIME02-STILL-005 | Save and reload with Match active. | Reload restored Match mode and the 55.0-second duration. | **PASS** |
+
+**Run total:** 5 checks: 5 passed, 0 failed, 0 blocked. No video-specific behavior or export was exercised. The automated duration helper uses the same `getClipDuration` consumed by timeline, preview, and export clip boundaries; actual export output was not validated. Export’s soundtrack-based end behavior remains unchanged by the implementation.
+
+**Semantics:** `Match soundtrack` sets the still duration to the decoded soundtrack’s full duration and refreshes it when the audio is replaced. If duration is unavailable or audio is removed, the last usable stored duration is kept; selecting Match is disabled until a decoded duration is known. `Custom duration` is a numeric seconds value with a 0.1-second minimum, bounded so the clip end remains within 86,400 seconds total timeline time. A custom clip may end beyond the soundtrack; preview/timeline clip extent remains visible, but playback/export still stop at the soundtrack end. Existing v1–v4 projects migrate clips to Custom and preserve existing still durations. No image or video asset is duplicated.
+
+**Automated validation:** `npm test` passed **58/58**, `npm run build` passed, and `git diff --check` passed. Native browsers, independently downloaded export validation, and export runtime beyond 30 seconds remain untested.
+
+## TIME-02 matched still split regression
+
+**Run date:** 2026-11-04
+**Scope:** Automated timeline-helper regression; no browser or server was needed.
+
+Splitting a still in Match soundtrack mode now converts both resulting clip segments to Custom, preserving their pre-split durations and adjacency. This prevents a future soundtrack replacement from expanding each half independently to the full soundtrack duration. A focused test uses a 40-second matched still, splits at 15 seconds, then applies a 55-second audio-duration update and verifies the segments remain 15 and 25 seconds. The same test verifies both segments are Custom; existing custom still and video source-range split assertions remain in the suite.
+
+**Validation:** `npm test` passed **59/59**, `npm run build` passed, and `git diff --check` passed. No browser, export, or native-browser validation was performed for this helper-level change. TIME-02 remains **IN_REVIEW**; this increment does not close any broader timeline, preview, export, or release gate.

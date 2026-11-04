@@ -2,6 +2,8 @@ import {
   DEFAULT_TRACK_ID,
   MAX_TIMELINE_MARKER_LABEL_LENGTH,
   MAX_TIMELINE_MARKER_TIME,
+  MAX_TIMELINE_DURATION,
+  MIN_STILL_DURATION,
   defaultVideoTrack,
   type TimelineClip,
   type TimelineMarker,
@@ -41,7 +43,7 @@ export type ProjectOutputSettings = {
 };
 
 /**
- * Version 4 of the storage-agnostic project document.
+ * Version 5 of the storage-agnostic project document.
  * TimelineClip and VisualTransform are the same edit values used at runtime.
  */
 export type ProjectDocument = {
@@ -49,7 +51,7 @@ export type ProjectDocument = {
   name: string;
   createdAt: string;
   updatedAt: string;
-  schemaVersion: 4;
+  schemaVersion: 5;
   audio: ProjectAudioAsset | null;
   assets: ProjectVisualAsset[];
   tracks: TimelineTrack[];
@@ -186,18 +188,23 @@ function validateTransform(value: unknown, path: string): VisualTransform {
   };
 }
 
-function validateClip(value: unknown, index: number, version: 1 | 2 | 3 | 4): TimelineClip {
+function validateClip(value: unknown, index: number, version: 1 | 2 | 3 | 4 | 5): TimelineClip {
   const path = `clips[${index}]`;
   const clip = recordAt(value, path);
   exactKeys(clip, path, version === 1
     ? ['id', 'assetId', 'start', 'end', 'stillDuration', 'transition', 'transform']
-    : ['id', 'assetId', 'trackId', 'timelinePosition', 'start', 'end', 'stillDuration', 'transition', 'transform']);
+    : version === 5
+      ? ['id', 'assetId', 'trackId', 'timelinePosition', 'start', 'end', 'stillDuration', 'stillDurationMode', 'transition', 'transform']
+      : ['id', 'assetId', 'trackId', 'timelinePosition', 'start', 'end', 'stillDuration', 'transition', 'transform']);
   if (clip.transition !== 'none' && clip.transition !== 'fade') {
     return fail(`${path}.transition`, 'expected "none" or "fade"');
   }
   const start = numberAt(clip.start, `${path}.start`, { minimum: 0 });
   const end = numberAt(clip.end, `${path}.end`, { minimum: 0 });
   if (end < start) return fail(`${path}.end`, 'must be greater than or equal to start');
+  if (version === 5 && clip.stillDurationMode !== 'custom' && clip.stillDurationMode !== 'match-audio') {
+    return fail(`${path}.stillDurationMode`, 'expected "custom" or "match-audio"');
+  }
   return {
     id: stringAt(clip.id, `${path}.id`),
     assetId: stringAt(clip.assetId, `${path}.assetId`),
@@ -208,6 +215,9 @@ function validateClip(value: unknown, index: number, version: 1 | 2 | 3 | 4): Ti
     start,
     end,
     stillDuration: numberAt(clip.stillDuration, `${path}.stillDuration`, { minimum: Number.MIN_VALUE }),
+    stillDurationMode: version === 5
+      ? clip.stillDurationMode as TimelineClip['stillDurationMode']
+      : 'custom',
     transition: clip.transition,
     transform: validateTransform(clip.transform, `${path}.transform`),
   };
@@ -343,8 +353,8 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
   const path = 'project';
   const project = recordAt(value, path);
   const version = project.schemaVersion;
-  if (version !== 1 && version !== 2 && version !== 3 && version !== 4) {
-    return fail('schemaVersion', `unsupported schema version ${String(version)} (supported: 1, 2, 3, 4)`);
+  if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5) {
+    return fail('schemaVersion', `unsupported schema version ${String(version)} (supported: 1, 2, 3, 4, 5)`);
   }
   exactKeys(project, path, version === 1 ? [
     'id',
@@ -379,6 +389,19 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
     'clips',
     'outputSettings',
     'titleOverlays',
+  ] : version === 4 ? [
+    'id',
+    'name',
+    'createdAt',
+    'updatedAt',
+    'schemaVersion',
+    'audio',
+    'assets',
+    'tracks',
+    'clips',
+    'outputSettings',
+    'titleOverlays',
+    'markers',
   ] : [
     'id',
     'name',
@@ -397,7 +420,7 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
   if (!Array.isArray(project.clips)) return fail('clips', 'expected an array');
   if (version >= 2 && !Array.isArray(project.tracks)) return fail('tracks', 'expected an array');
   if (version >= 3 && !Array.isArray(project.titleOverlays)) return fail('titleOverlays', 'expected an array');
-  if (version === 4 && !Array.isArray(project.markers)) return fail('markers', 'expected an array');
+  if (version >= 4 && !Array.isArray(project.markers)) return fail('markers', 'expected an array');
 
   const projectId = stringAt(project.id, 'project.id');
   const name = stringAt(project.name, 'project.name');
@@ -420,7 +443,7 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
   const titleOverlays = version >= 3
     ? (project.titleOverlays as unknown[]).map(validateTitleOverlay)
     : [];
-  const markers = version === 4
+  const markers = version >= 4
     ? (project.markers as unknown[]).map(validateTimelineMarker)
     : [];
   const ids = new Set<string>();
@@ -452,6 +475,15 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
     if (!trackIds.has(clip.trackId)) {
       return fail(`clips[${index}].trackId`, `references missing visual track "${clip.trackId}"`);
     }
+    const asset = assets.find((item) => item.id === clip.assetId);
+    if (version === 5 && asset?.kind === 'image') {
+      if (clip.stillDuration < MIN_STILL_DURATION || clip.stillDuration > MAX_TIMELINE_DURATION) {
+        return fail(`clips[${index}].stillDuration`, 'still duration must be between 0.1 seconds and 24 hours');
+      }
+      if (clip.timelinePosition + clip.stillDuration > MAX_TIMELINE_DURATION) {
+        return fail(`clips[${index}]`, 'still timing must remain within 24 hours');
+      }
+    }
   }
 
   return {
@@ -459,7 +491,7 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
     name,
     createdAt,
     updatedAt,
-    schemaVersion: 4,
+    schemaVersion: 5,
     audio,
     assets,
     tracks,

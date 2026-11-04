@@ -9,6 +9,7 @@ import {
   getTimelineDuration,
   getTimelinePositionFromDrop,
   moveClip,
+  normalizeStillDuration,
   getActiveClips,
   getClipSourceTime,
   locateClipAtTime,
@@ -16,6 +17,8 @@ import {
   snapTimelinePosition,
   splitClip,
   splitClipAtTimelineTime,
+  setStillDurationMode,
+  updateMatchedStillDurations,
 } from './timeline.ts';
 import {
   getPreviewPlaybackRejectionStatus,
@@ -32,6 +35,7 @@ const videoClip = (id, start = 0, end = 10) => ({
   start,
   end,
   stillDuration: 5,
+  stillDurationMode: 'custom',
   transition: 'none',
   transform: { ...defaultTransform },
 });
@@ -39,6 +43,28 @@ const videoClip = (id, start = 0, end = 10) => ({
 test('uses source range for video and configured duration for stills', () => {
   assert.equal(getClipDuration(videoClip('video', 2, 8)), 6);
   assert.equal(getClipDuration({ ...videoClip('still'), end: 0, stillDuration: 7 }), 7);
+});
+
+test('resolves matched still durations, preserves unknown last-known values, and supports long custom stills', () => {
+  const still = {
+    ...videoClip('still'),
+    end: 0,
+    timelinePosition: 3,
+    stillDuration: 45,
+    stillDurationMode: 'custom',
+  };
+  assert.equal(getClipDuration(still), 45);
+  assert.equal(getClipDuration(setStillDurationMode(still, 'match-audio', 72.5)), 72.5);
+  const matched = { ...still, stillDurationMode: 'match-audio', stillDuration: 72.5 };
+  const replaced = updateMatchedStillDurations([matched, still], 120);
+  assert.equal(getClipDuration(replaced[0]), 120);
+  assert.equal(getClipDuration(replaced[1]), 45);
+  assert.equal(updateMatchedStillDurations(replaced, 0), replaced);
+  assert.equal(getClipDuration(updateMatchedStillDurations(replaced, Number.NaN)[0]), 120);
+  assert.equal(normalizeStillDuration(0, 0), 0.1);
+  assert.equal(normalizeStillDuration(90_000, 10), 86_390);
+  assert.equal(getTimelineDuration([still]), 48);
+  assert.equal(getClipDuration(videoClip('video', 2, 8)), 6);
 });
 
 test('sums sequence duration', () => {
@@ -167,6 +193,25 @@ test('splits at the absolute playhead while retaining source in/out and still du
   const [stillA, stillB] = splitClipAtTimelineTime([still], 'still', 8);
   assert.deepEqual([stillA.stillDuration, stillA.timelinePosition], [3, 5]);
   assert.deepEqual([stillB.stillDuration, stillB.timelinePosition], [5, 8]);
+  assert.deepEqual([stillA.stillDurationMode, stillB.stillDurationMode], ['custom', 'custom']);
+});
+
+test('splitting a matched still preserves its durations after soundtrack replacement', () => {
+  const matchedStill = {
+    ...videoClip('matched-still'),
+    end: 0,
+    stillDuration: 40,
+    stillDurationMode: 'match-audio',
+  };
+  const split = splitClipAtTimelineTime([matchedStill], 'matched-still', 15);
+
+  assert.deepEqual(split.map((clip) => clip.stillDuration), [15, 25]);
+  assert.deepEqual(split.map((clip) => clip.timelinePosition), [0, 15]);
+  assert.deepEqual(split.map((clip) => clip.stillDurationMode), ['custom', 'custom']);
+
+  const afterSoundtrackReplacement = updateMatchedStillDurations(split, 55);
+  assert.deepEqual(afterSoundtrackReplacement.map((clip) => clip.stillDuration), [15, 25]);
+  assert.deepEqual(afterSoundtrackReplacement.map((clip) => clip.timelinePosition), [0, 15]);
 });
 
 test('keeps common platform presets available', () => {

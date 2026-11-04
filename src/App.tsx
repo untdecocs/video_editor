@@ -31,6 +31,11 @@ import {
   snapTimelinePosition,
   splitClipAtTimelineTime,
   createTimelineMarker,
+  MAX_TIMELINE_DURATION,
+  MIN_STILL_DURATION,
+  normalizeStillDuration,
+  setStillDurationMode,
+  updateMatchedStillDurations,
   type TimelineTrack,
   type TimelineAsset,
   type TimelineClip,
@@ -256,7 +261,7 @@ function App() {
     name: name.trim() || 'Untitled project',
     createdAt,
     updatedAt: new Date().toISOString(),
-    schemaVersion: 4,
+    schemaVersion: 5,
     audio: audioFile ? {
       id: `${id}-audio`,
       fileName: audioFile.name,
@@ -343,18 +348,20 @@ function App() {
       urlsRef.current.replace(createdUrls);
 
       const documentValue = stored.document;
+      const restoredAudioDuration = documentValue.audio?.duration ?? 0;
+      const restoredClips = updateMatchedStillDurations(documentValue.clips, restoredAudioDuration);
       setProjectId(documentValue.id);
       setProjectName(documentValue.name);
       setProjectCreatedAt(documentValue.createdAt);
       setAudioFile(audioFileToRestore);
       setAudioUrl(restoredAudioUrl);
-      setAudioDuration(documentValue.audio?.duration ?? 0);
+      setAudioDuration(restoredAudioDuration);
       setAssets(restoredAssets);
       setTracks(documentValue.tracks);
-      setClips(documentValue.clips);
+      setClips(restoredClips);
       setTitles(documentValue.titleOverlays);
       setMarkers(documentValue.markers);
-      setSelectedClipId(documentValue.clips[0]?.id ?? '');
+      setSelectedClipId(restoredClips[0]?.id ?? '');
       setSelectedTitleId(documentValue.titleOverlays[0]?.id ?? '');
       setStep(documentValue.audio ? (documentValue.clips.length ? 3 : 2) : 1);
       setCurrentTime(0);
@@ -368,10 +375,10 @@ function App() {
       if (fileInputRef.current) fileInputRef.current.value = '';
       resetEditHistory({
         audioFile: audioFileToRestore,
-        audioDuration: documentValue.audio?.duration ?? 0,
+        audioDuration: restoredAudioDuration,
         assets: restoredAssets.map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
         tracks: documentValue.tracks,
-        clips: documentValue.clips,
+        clips: restoredClips,
         titles: documentValue.titleOverlays,
         markers: documentValue.markers,
         outputSettings: { ...documentValue.outputSettings },
@@ -476,10 +483,12 @@ function App() {
       revokeUrl(audioUrl);
     }
     const url = urlsRef.current.create(file);
+    const nextClips = updateMatchedStillDurations(clips, duration);
     setAudioFile(file);
     setAudioUrl(url);
     setAudioDuration(duration);
-    recordEdit(makeEditSnapshot({ audioFile: file, audioDuration: duration }));
+    setClips(nextClips);
+    recordEdit(makeEditSnapshot({ audioFile: file, audioDuration: duration, clips: nextClips }));
     setCurrentTime(0);
     setStatusMessage(`Loaded ${file.name}`);
   };
@@ -548,14 +557,18 @@ function App() {
       let appendAt = getTimelineDuration(clips);
       const appendTrackId = tracks.find((track) => !track.locked)!.id;
       const newClips = validAssets.map((asset): TimelineClip => {
+        const timelinePosition = asset.kind === 'image'
+          ? Math.min(appendAt, MAX_TIMELINE_DURATION - MIN_STILL_DURATION)
+          : appendAt;
         const clip: TimelineClip = {
           id: newId(),
           assetId: asset.id,
           trackId: appendTrackId,
-          timelinePosition: appendAt,
+          timelinePosition,
           start: 0,
           end: asset.kind === 'video' ? asset.duration : 0,
-          stillDuration: 5,
+          stillDuration: asset.kind === 'image' ? normalizeStillDuration(5, timelinePosition) : 5,
+          stillDurationMode: 'custom',
           transition: 'none',
           transform: { ...defaultTransform },
         };
@@ -592,7 +605,30 @@ function App() {
   const updateClip = (id: string, patch: Partial<TimelineClip>) => {
     const target = clips.find((clip) => clip.id === id);
     if (!target || tracks.find((track) => track.id === target.trackId)?.locked) return;
-    const nextClips = clips.map((clip) => clip.id === id ? { ...clip, ...patch } : clip);
+    const asset = assets.find((item) => item.id === target.assetId);
+    const isStill = asset?.kind === 'image';
+    const normalizedPatch = { ...patch };
+    if (isStill && typeof normalizedPatch.timelinePosition === 'number') {
+      normalizedPatch.timelinePosition = Math.max(
+        0,
+        Math.min(normalizedPatch.timelinePosition, MAX_TIMELINE_DURATION - MIN_STILL_DURATION),
+      );
+    }
+    let updated = { ...target, ...normalizedPatch };
+    if (isStill && patch.stillDurationMode === 'match-audio' && audioDuration <= 0) return;
+    if (isStill && (
+      patch.stillDurationMode === 'match-audio'
+      || (typeof patch.timelinePosition === 'number' && updated.stillDurationMode === 'match-audio')
+    )) {
+      updated = setStillDurationMode(updated, 'match-audio', audioDuration);
+    }
+    if (isStill && (typeof patch.stillDuration === 'number' || typeof patch.timelinePosition === 'number')) {
+      updated = {
+        ...updated,
+        stillDuration: normalizeStillDuration(updated.stillDuration, updated.timelinePosition),
+      };
+    }
+    const nextClips = clips.map((clip) => clip.id === id ? updated : clip);
     if (nextClips.every((clip, index) => clip === clips[index])) return;
     setClips(nextClips);
     recordEdit(makeEditSnapshot({ clips: nextClips }));
@@ -660,8 +696,18 @@ function App() {
     const clip = clips.find((item) => item.id === id);
     const targetTrack = tracks.find((track) => track.id === trackId);
     if (!clip || !targetTrack || targetTrack.locked || tracks.find((track) => track.id === clip.trackId)?.locked) return;
-    const position = snapTimelinePosition(timelinePosition, false);
-    const nextClips = clips.map((item) => item.id === id ? { ...item, trackId, timelinePosition: position } : item);
+    const isStill = assets.find((asset) => asset.id === clip.assetId)?.kind === 'image';
+    const position = Math.min(
+      snapTimelinePosition(timelinePosition, false),
+      MAX_TIMELINE_DURATION - (isStill ? MIN_STILL_DURATION : 0),
+    );
+    let updated = { ...clip, trackId, timelinePosition: position };
+    if (isStill && clip.stillDurationMode === 'match-audio') {
+      updated = setStillDurationMode(updated, 'match-audio', audioDuration);
+    } else if (isStill) {
+      updated = { ...updated, stillDuration: normalizeStillDuration(updated.stillDuration, position) };
+    }
+    const nextClips = clips.map((item) => item.id === id ? updated : item);
     if (nextClips.every((item, index) => item === clips[index])) return;
     setClips(nextClips);
     recordEdit(makeEditSnapshot({ clips: nextClips, tracks }));

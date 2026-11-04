@@ -41,6 +41,7 @@ export type TimelineClip = {
   start: number;
   end: number;
   stillDuration: number;
+  stillDurationMode: 'custom' | 'match-audio';
   transition: 'none' | 'fade';
   transform: VisualTransform;
 };
@@ -52,7 +53,56 @@ export type TimelineMarker = {
 };
 
 export const MAX_TIMELINE_MARKER_TIME = 86_400;
+export const MAX_TIMELINE_DURATION = 86_400;
+export const MIN_STILL_DURATION = 0.1;
 export const MAX_TIMELINE_MARKER_LABEL_LENGTH = 80;
+
+export type StillDurationMode = TimelineClip['stillDurationMode'];
+
+/** Duration available to a still at a timeline position, with a usable 0.1s minimum. */
+export function getStillDurationLimit(timelinePosition: number): number {
+  const position = Number.isFinite(timelinePosition) ? Math.max(0, timelinePosition) : 0;
+  return Math.max(MIN_STILL_DURATION, MAX_TIMELINE_DURATION - position);
+}
+
+export function normalizeStillDuration(duration: number, timelinePosition: number): number {
+  const limit = getStillDurationLimit(timelinePosition);
+  const safeDuration = Number.isFinite(duration) ? duration : MIN_STILL_DURATION;
+  return Math.min(limit, Math.max(MIN_STILL_DURATION, safeDuration));
+}
+
+/** Match mode stores its latest usable resolved duration in stillDuration. */
+export function setStillDurationMode(
+  clip: TimelineClip,
+  mode: StillDurationMode,
+  audioDuration: number,
+): TimelineClip {
+  if (mode === 'match-audio' && Number.isFinite(audioDuration) && audioDuration > 0) {
+    return {
+      ...clip,
+      stillDurationMode: mode,
+      stillDuration: normalizeStillDuration(audioDuration, clip.timelinePosition),
+    };
+  }
+  return { ...clip, stillDurationMode: mode };
+}
+
+/** Refresh matched stills after an audio duration is decoded or replaced. */
+export function updateMatchedStillDurations(
+  clips: TimelineClip[],
+  audioDuration: number,
+): TimelineClip[] {
+  if (!Number.isFinite(audioDuration) || audioDuration <= 0) return clips;
+  let changed = false;
+  const next = clips.map((clip) => {
+    if (clip.end > clip.start || clip.stillDurationMode !== 'match-audio') return clip;
+    const stillDuration = normalizeStillDuration(audioDuration, clip.timelinePosition);
+    if (stillDuration === clip.stillDuration) return clip;
+    changed = true;
+    return { ...clip, stillDuration };
+  });
+  return changed ? next : clips;
+}
 
 export function createTimelineMarker(
   markers: TimelineMarker[],
@@ -161,10 +211,16 @@ export function duplicateTimelineClip(
   const ids = new Set(clips.map((clip) => clip.id));
   let id = createId();
   while (ids.has(id)) id = createId();
+  const isStill = source.end <= source.start;
+  const timelinePosition = Math.min(
+    source.timelinePosition + getClipDuration(source),
+    MAX_TIMELINE_DURATION - (isStill ? MIN_STILL_DURATION : 0),
+  );
   const duplicate = {
     ...source,
     id,
-    timelinePosition: source.timelinePosition + getClipDuration(source),
+    timelinePosition,
+    ...(isStill ? { stillDuration: normalizeStillDuration(source.stillDuration, timelinePosition) } : {}),
     transform: { ...source.transform },
   };
   const sourceIndex = clips.indexOf(source);
@@ -246,12 +302,14 @@ export function splitClipAtTimelineTime(clips: TimelineClip[], clipId: string, t
   const secondDuration = clip.stillDuration - firstDuration;
   if (firstDuration <= 0 || secondDuration <= 0) return clips;
   const index = clips.indexOf(clip);
-  const first = { ...clip, stillDuration: firstDuration };
+  const stillDurationMode = clip.stillDurationMode === 'match-audio' ? 'custom' : clip.stillDurationMode;
+  const first = { ...clip, stillDuration: firstDuration, stillDurationMode };
   const second = {
     ...clip,
     id: globalThis.crypto?.randomUUID?.() ?? `clip-${Date.now()}-${Math.random().toString(36).slice(2)}`,
     timelinePosition: time,
     stillDuration: secondDuration,
+    stillDurationMode,
   };
   return [...clips.slice(0, index), first, second, ...clips.slice(index + 1)];
 }

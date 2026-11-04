@@ -8,7 +8,7 @@ const sampleProject = () => ({
   name: 'Social cut',
   createdAt: '2026-11-02T12:00:00.000Z',
   updatedAt: '2026-11-02T12:30:00.000Z',
-  schemaVersion: 4,
+  schemaVersion: 5,
   audio: {
     id: 'audio-1',
     fileName: 'narration.wav',
@@ -46,7 +46,8 @@ const sampleProject = () => ({
       timelinePosition: 0,
       start: 0,
       end: 0,
-      stillDuration: 6,
+      stillDuration: 45,
+      stillDurationMode: 'custom',
       transition: 'fade',
       transform: { ...defaultTransform, fit: 'contain', zoom: 1.2, x: -0.1, flipY: true },
     },
@@ -58,6 +59,7 @@ const sampleProject = () => ({
       start: 1.5,
       end: 9.5,
       stillDuration: 5,
+      stillDurationMode: 'custom',
       transition: 'none',
       transform: { ...defaultTransform, rotation: 90 },
     },
@@ -96,20 +98,20 @@ test('reports invalid JSON and malformed schema documents', () => {
   delete missingAudio.audio;
   assert.throws(() => parseProject(JSON.stringify(missingAudio)), /project\.audio/);
   assert.throws(
-    () => parseProject(JSON.stringify({ ...sampleProject(), schemaVersion: 5 })),
-    /unsupported schema version 5/,
+    () => parseProject(JSON.stringify({ ...sampleProject(), schemaVersion: 6 })),
+    /unsupported schema version 6/,
   );
 });
 
-test('migrates a legacy v1 ordered sequence to a default track and v4 without changing clip timing or edits', () => {
+test('migrates a legacy v1 ordered sequence to a default track and v5 without changing clip timing or edits', () => {
   const legacy = sampleProject();
   legacy.schemaVersion = 1;
   delete legacy.tracks;
   delete legacy.titleOverlays;
   delete legacy.markers;
-  legacy.clips = legacy.clips.map(({ trackId, timelinePosition, ...clip }) => clip);
+  legacy.clips = legacy.clips.map(({ trackId, timelinePosition, stillDurationMode, ...clip }) => clip);
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.schemaVersion, 4);
+  assert.equal(migrated.schemaVersion, 5);
   assert.deepEqual(migrated.titleOverlays, []);
   assert.deepEqual(migrated.markers, []);
   assert.deepEqual(migrated.tracks, [{
@@ -117,9 +119,10 @@ test('migrates a legacy v1 ordered sequence to a default track and v4 without ch
   }]);
   assert.deepEqual(migrated.clips.map(({ timelinePosition, trackId }) => ({ timelinePosition, trackId })), [
     { timelinePosition: 0, trackId: 'track-video-1' },
-    { timelinePosition: 6, trackId: 'track-video-1' },
+    { timelinePosition: 45, trackId: 'track-video-1' },
   ]);
   assert.equal(migrated.clips[0].stillDuration, legacy.clips[0].stillDuration);
+  assert.deepEqual(migrated.clips.map((clip) => clip.stillDurationMode), ['custom', 'custom']);
   assert.equal(migrated.clips[0].transition, legacy.clips[0].transition);
   assert.deepEqual(migrated.clips[0].transform, legacy.clips[0].transform);
   assert.equal(migrated.clips[1].start, legacy.clips[1].start);
@@ -128,17 +131,18 @@ test('migrates a legacy v1 ordered sequence to a default track and v4 without ch
   assert.deepEqual(migrated.audio, legacy.audio);
 });
 
-test('migrates v2 projects to v4 while preserving tracks, clips, media, and output settings', () => {
+test('migrates v2 projects to v5 while preserving tracks, clips, media, and output settings', () => {
   const legacy = sampleProject();
   legacy.schemaVersion = 2;
   delete legacy.titleOverlays;
   delete legacy.markers;
+  legacy.clips = legacy.clips.map(({ stillDurationMode, ...clip }) => clip);
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.schemaVersion, 4);
+  assert.equal(migrated.schemaVersion, 5);
   assert.deepEqual(migrated.titleOverlays, []);
   assert.deepEqual(migrated.markers, []);
   assert.deepEqual(migrated.tracks, legacy.tracks);
-  assert.deepEqual(migrated.clips, legacy.clips);
+  assert.deepEqual(migrated.clips, legacy.clips.map((clip) => ({ ...clip, stillDurationMode: 'custom' })));
   assert.deepEqual(migrated.assets, legacy.assets);
   assert.deepEqual(migrated.audio, legacy.audio);
   assert.deepEqual(migrated.outputSettings, legacy.outputSettings);
@@ -148,15 +152,31 @@ test('migrates v3 documents by preserving existing fields and adding an empty ma
   const legacy = sampleProject();
   legacy.schemaVersion = 3;
   delete legacy.markers;
+  legacy.clips = legacy.clips.map(({ stillDurationMode, ...clip }) => clip);
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.schemaVersion, 4);
+  assert.equal(migrated.schemaVersion, 5);
   assert.deepEqual(migrated.markers, []);
   assert.deepEqual(migrated.titleOverlays, legacy.titleOverlays);
   assert.deepEqual(migrated.tracks, legacy.tracks);
-  assert.deepEqual(migrated.clips, legacy.clips);
+  assert.deepEqual(migrated.clips, legacy.clips.map((clip) => ({ ...clip, stillDurationMode: 'custom' })));
   assert.deepEqual(migrated.assets, legacy.assets);
   assert.deepEqual(migrated.audio, legacy.audio);
   assert.deepEqual(migrated.outputSettings, legacy.outputSettings);
+});
+
+test('migrates v4 still durations as custom and round-trips the v5 mode', () => {
+  const legacy = sampleProject();
+  legacy.schemaVersion = 4;
+  legacy.clips = legacy.clips.map(({ stillDurationMode, ...clip }) => clip);
+  const migrated = parseProject(JSON.stringify(legacy));
+  assert.equal(migrated.schemaVersion, 5);
+  assert.equal(migrated.clips[0].stillDuration, 45);
+  assert.equal(migrated.clips[0].stillDurationMode, 'custom');
+  assert.deepEqual(parseProject(serializeProject(migrated)), migrated);
+
+  const matched = sampleProject();
+  matched.clips[0].stillDurationMode = 'match-audio';
+  assert.equal(parseProject(serializeProject(matched)).clips[0].stillDurationMode, 'match-audio');
 });
 
 test('round-trips timeline markers and strictly rejects invalid marker data', () => {

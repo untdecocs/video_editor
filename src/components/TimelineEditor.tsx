@@ -4,8 +4,12 @@ import type { TitleOverlay } from '../services/titleOverlay';
 import {
   clampTimelineTime,
   getClipDuration,
+  getStillDurationLimit,
   getTimelineDuration,
   getTimelinePositionFromDrop,
+  MAX_TIMELINE_DURATION,
+  MIN_STILL_DURATION,
+  normalizeStillDuration,
 } from '../services/timeline';
 
 type TimelineEditorProps = {
@@ -46,6 +50,7 @@ export function TimelineEditor({
   const [selectedTrackId, setSelectedTrackId] = useState(tracks[0]?.id ?? '');
   const [snapEnabled, setSnapEnabled] = useState(true);
   const [markerLabels, setMarkerLabels] = useState<Record<string, string>>({});
+  const [stillDurationDraft, setStillDurationDraft] = useState('');
   const dragRef = useRef<{ clipId: string; grabOffsetPixels: number } | null>(null);
   // Show the visually highest (largest order) tracks first; renderers draw
   // low-to-high so this display order maps to top-to-bottom compositing.
@@ -62,6 +67,10 @@ export function TimelineEditor({
   useEffect(() => {
     setMarkerLabels(Object.fromEntries(markers.map((marker) => [marker.id, marker.label])));
   }, [markers]);
+
+  useEffect(() => {
+    setStillDurationDraft(selectedClip ? String(selectedClip.stillDuration) : '');
+  }, [selectedClip?.id, selectedClip?.stillDuration]);
 
   return (
     <section className="space-y-4 border-t border-neutral-200 pt-5">
@@ -273,7 +282,26 @@ export function TimelineEditor({
           <div className="space-y-3">
             <h4 className="text-xs font-semibold uppercase tracking-wide text-neutral-500">Clip timing</h4>
             <label className="block text-xs text-neutral-600">Timeline position (sec)
-              <input className="mt-1 w-full border border-neutral-200 bg-white px-2 py-2 text-sm" type="number" min="0" step="0.1" value={selectedClip.timelinePosition} disabled={selectedTrack?.locked} onChange={(event) => onChange(selectedClip.id, { timelinePosition: Math.max(0, Number(event.target.value)) })} />
+              <input
+                className="mt-1 w-full border border-neutral-200 bg-white px-2 py-2 text-sm"
+                type="number"
+                min="0"
+                max={selectedAsset.kind === 'image' ? MAX_TIMELINE_DURATION - MIN_STILL_DURATION : MAX_TIMELINE_DURATION}
+                step="0.1"
+                value={selectedClip.timelinePosition}
+                disabled={selectedTrack?.locked}
+                onChange={(event) => {
+                  const position = event.currentTarget.valueAsNumber;
+                  if (Number.isFinite(position)) {
+                    onChange(selectedClip.id, {
+                      timelinePosition: Math.max(0, Math.min(
+                        position,
+                        selectedAsset.kind === 'image' ? MAX_TIMELINE_DURATION - MIN_STILL_DURATION : MAX_TIMELINE_DURATION,
+                      )),
+                    });
+                  }
+                }}
+              />
             </label>
             {selectedAsset.kind === 'video' ? (
               <div className="grid grid-cols-2 gap-3">
@@ -285,9 +313,53 @@ export function TimelineEditor({
                 </label>
               </div>
             ) : (
-              <label className="block text-xs text-neutral-600">Still duration · {selectedClip.stillDuration}s
-                <input className="mt-2 w-full accent-moss" type="range" min="1" max="30" step="1" value={selectedClip.stillDuration} disabled={selectedTrack?.locked} onChange={(event) => onChange(selectedClip.id, { stillDuration: Number(event.target.value) })} />
-              </label>
+              <div className="space-y-2">
+                <label className="block text-xs text-neutral-600" htmlFor="still-duration-mode">Still duration mode</label>
+                <select
+                  id="still-duration-mode"
+                  className="w-full border border-neutral-200 bg-white px-2 py-2 text-sm"
+                  value={selectedClip.stillDurationMode}
+                  disabled={selectedTrack?.locked}
+                  onChange={(event) => onChange(selectedClip.id, { stillDurationMode: event.target.value as TimelineClip['stillDurationMode'] })}
+                >
+                  <option value="custom">Custom duration</option>
+                  <option value="match-audio" disabled={soundtrackDuration <= 0}>Match soundtrack</option>
+                </select>
+                {selectedClip.stillDurationMode === 'custom' ? (
+                  <label className="block text-xs text-neutral-600" htmlFor="still-duration">Custom duration (seconds)
+                    <input
+                      id="still-duration"
+                      className="mt-1 w-full border border-neutral-200 bg-white px-2 py-2 text-sm"
+                      type="number"
+                      min={MIN_STILL_DURATION}
+                      max={getStillDurationLimit(selectedClip.timelinePosition)}
+                      step="0.1"
+                      value={stillDurationDraft}
+                      disabled={selectedTrack?.locked}
+                      onChange={(event) => setStillDurationDraft(event.currentTarget.value)}
+                      onBlur={() => {
+                        const value = Number(stillDurationDraft);
+                        if (Number.isFinite(value) && stillDurationDraft.trim()) {
+                          const duration = normalizeStillDuration(value, selectedClip.timelinePosition);
+                          onChange(selectedClip.id, { stillDuration: duration });
+                          setStillDurationDraft(String(duration));
+                        } else {
+                          setStillDurationDraft(String(selectedClip.stillDuration));
+                        }
+                      }}
+                    />
+                  </label>
+                ) : (
+                  <p className="text-xs text-neutral-500">
+                    {soundtrackDuration > 0
+                      ? `Matches the full decoded soundtrack · ${selectedClip.stillDuration.toFixed(1)} sec`
+                      : `Soundtrack duration is unavailable. Match soundtrack is disabled; the last usable still duration (${selectedClip.stillDuration.toFixed(1)} sec) is preserved.`}
+                  </p>
+                )}
+                {soundtrackDuration <= 0 && selectedClip.stillDurationMode === 'custom' && (
+                  <p className="text-xs text-neutral-500">Match soundtrack is unavailable until a decoded soundtrack duration is known. Your custom duration is unchanged.</p>
+                )}
+              </div>
             )}
             <label className="block text-xs text-neutral-600">Transition into clip
               <select className="mt-1 w-full border border-neutral-200 bg-white px-2 py-2 text-sm" value={selectedClip.transition} disabled={selectedTrack?.locked} onChange={(event) => onChange(selectedClip.id, { transition: event.target.value as TimelineClip['transition'] })}>
