@@ -30,6 +30,7 @@ export interface ProjectRecordBackend {
   list(): Promise<unknown[]>;
   get(id: string): Promise<unknown | undefined>;
   put(id: string, value: unknown): Promise<void>;
+  add(id: string, value: unknown): Promise<void>;
   delete(id: string): Promise<void>;
 }
 
@@ -89,6 +90,30 @@ function validateStoredProject(value: unknown): StoredProject {
   };
 }
 
+function validateForStorage(documentValue: ProjectDocument, media: ProjectMediaBlobs): StoredProject {
+  const document = validateProjectDocument(documentValue);
+  if (!isRecord(media) || !isRecord(media.assets)) {
+    throw new ProjectStorageError('Project media could not be saved because its data is malformed.');
+  }
+  if (document.audio) assertBlob(media.audio, document.audio.fileName, document.audio.size);
+  else if (media.audio !== null) {
+    throw new ProjectStorageError('Project audio changed before saving. Retry the save.');
+  }
+  const assetBlobs: Record<string, Blob> = {};
+  for (const asset of document.assets) {
+    const blob = media.assets[asset.id];
+    assertBlob(blob, asset.fileName, asset.size);
+    assetBlobs[asset.id] = blob;
+  }
+  if (Object.keys(media.assets).some((id) => !document.assets.some((asset) => asset.id === id))) {
+    throw new ProjectStorageError('Project media contains unexpected visual data.');
+  }
+  return {
+    document,
+    media: { audio: document.audio ? media.audio as Blob : null, assets: assetBlobs },
+  };
+}
+
 function storageFailure(error: unknown): ProjectStorageError {
   if (error instanceof ProjectStorageError) return error;
   const detail = error instanceof Error ? error.message : String(error);
@@ -97,6 +122,9 @@ function storageFailure(error: unknown): ProjectStorageError {
     return new ProjectStorageError(
       'Browser storage is full. Free space or delete an old saved project, then retry. Your current edits are still open.',
     );
+  }
+  if (name === 'ConstraintError') {
+    return new ProjectStorageError('A saved project already uses this new ID. Retry the import; your current edits are still open.');
   }
   return new ProjectStorageError(
     `Could not access browser project storage${detail ? ` (${detail})` : ''}. Check browser storage permissions and retry. Your current edits are still open.`,
@@ -184,6 +212,14 @@ class IndexedDbProjectBackend implements ProjectRecordBackend {
     await done;
   }
 
+  async add(id: string, value: unknown): Promise<void> {
+    const database = await this.database();
+    const transaction = database.transaction(STORE_NAME, 'readwrite');
+    const done = transactionDone(transaction);
+    transaction.objectStore(STORE_NAME).add(value, id);
+    await done;
+  }
+
   async delete(id: string): Promise<void> {
     const database = await this.database();
     const transaction = database.transaction(STORE_NAME, 'readwrite');
@@ -263,25 +299,15 @@ export function createProjectStorage(
 
     async saveProject(documentValue: ProjectDocument, media: ProjectMediaBlobs): Promise<void> {
       return safely(async () => {
-        const document = validateProjectDocument(documentValue);
-        if (!isRecord(media) || !isRecord(media.assets)) {
-          throw new ProjectStorageError('Project media could not be saved because its data is malformed.');
-        }
-        if (document.audio) assertBlob(media.audio, document.audio.fileName, document.audio.size);
-        else if (media.audio !== null) {
-          throw new ProjectStorageError('Project audio changed before saving. Retry the save.');
-        }
-        const assetBlobs: Record<string, Blob> = {};
-        for (const asset of document.assets) {
-          const blob = media.assets[asset.id];
-          assertBlob(blob, asset.fileName, asset.size);
-          assetBlobs[asset.id] = blob;
-        }
-        const stored: StoredProject = {
-          document,
-          media: { audio: document.audio ? media.audio as Blob : null, assets: assetBlobs },
-        };
-        await backend.put(document.id, stored);
+        const stored = validateForStorage(documentValue, media);
+        await backend.put(stored.document.id, stored);
+      });
+    },
+
+    async saveProjectAsNew(documentValue: ProjectDocument, media: ProjectMediaBlobs): Promise<void> {
+      return safely(async () => {
+        const stored = validateForStorage(documentValue, media);
+        await backend.add(stored.document.id, stored);
       });
     },
 

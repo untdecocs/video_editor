@@ -14,6 +14,11 @@ import {
 } from './services/media';
 import { projectStorage, type ProjectSummary, type StoredProject } from './services/projectStorage';
 import type { ProjectDocument } from './services/project';
+import {
+  buildProjectPackage,
+  parseProjectPackage,
+  sanitizeProjectPackageFilename,
+} from './services/projectPackage';
 import { MediaUrlRegistry } from './services/mediaUrlRegistry';
 import { waitForVideoMetadata } from './services/videoMetadata';
 import { waitForAudioMetadata } from './services/audioMetadata';
@@ -116,6 +121,7 @@ function App() {
   const [statusMessage, setStatusMessage] = useState('');
   const [assetSearch, setAssetSearch] = useState('');
   const [isImportingVisuals, setIsImportingVisuals] = useState(false);
+  const [isProjectPackageBusy, setIsProjectPackageBusy] = useState(false);
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportComplete, setExportComplete] = useState(false);
@@ -126,6 +132,7 @@ function App() {
   const visualImportRef = useRef(false);
   const urlsRef = useRef(new MediaUrlRegistry());
   const fileInputRef = useRef<HTMLInputElement | null>(null);
+  const projectPackageInputRef = useRef<HTMLInputElement | null>(null);
   const startupRef = useRef(false);
   const historyRef = useRef<History<EditSnapshot> | null>(null);
   const projectListRef = useRef(projectList);
@@ -233,8 +240,8 @@ function App() {
 
   useEffect(() => () => urlsRef.current.clear(), []);
   useEffect(() => {
-    mainRef.current?.toggleAttribute('inert', isExporting);
-  }, [isExporting]);
+    mainRef.current?.toggleAttribute('inert', isExporting || isProjectPackageBusy);
+  }, [isExporting, isProjectPackageBusy]);
   useEffect(() => {
     if (wasExportingRef.current && !isExporting) exportButtonRef.current?.focus();
     wasExportingRef.current = isExporting;
@@ -306,7 +313,7 @@ function App() {
     });
   };
 
-  const applyStoredProject = async (stored: StoredProject) => {
+  const applyStoredProject = async (stored: StoredProject, mediaAlreadyDecoded = false) => {
     const createdUrls: string[] = [];
     try {
       const restoredAssets = await Promise.all(stored.document.assets.map(async (asset): Promise<TimelineAsset> => {
@@ -314,7 +321,7 @@ function App() {
         const file = new File([blob], asset.fileName, { type: asset.mimeType });
         const url = urlsRef.current.create(file);
         createdUrls.push(url);
-        if (asset.kind === 'image') {
+        if (!mediaAlreadyDecoded && asset.kind === 'image') {
           const image = new Image();
           image.src = url;
           try {
@@ -322,7 +329,7 @@ function App() {
           } catch {
             throw new Error(`Could not read "${asset.fileName}". Re-import the original media file.`);
           }
-        } else {
+        } else if (!mediaAlreadyDecoded) {
           const video = document.createElement('video');
           video.preload = 'metadata';
           await new Promise<void>((resolve, reject) => {
@@ -945,6 +952,130 @@ function App() {
     }
   };
 
+  const verifyPackageMediaDecodes = async (stored: StoredProject) => {
+    const temporaryUrls: string[] = [];
+    try {
+      if (stored.document.audio && stored.media.audio) {
+        const file = new File([stored.media.audio], stored.document.audio.fileName, { type: stored.document.audio.mimeType });
+        const url = urlsRef.current.create(file);
+        temporaryUrls.push(url);
+        const audio = document.createElement('audio');
+        await waitForAudioMetadata(audio, url);
+      }
+      for (const asset of stored.document.assets) {
+        const file = new File([stored.media.assets[asset.id]], asset.fileName, { type: asset.mimeType });
+        const url = urlsRef.current.create(file);
+        temporaryUrls.push(url);
+        if (asset.kind === 'image') {
+          const image = new Image();
+          image.src = url;
+          try {
+            await image.decode();
+          } catch {
+            throw new Error(`Could not decode "${asset.fileName}". Choose a readable original media file.`);
+          }
+        } else {
+          const video = document.createElement('video');
+          video.preload = 'metadata';
+          await new Promise<void>((resolve, reject) => {
+            const timeout = window.setTimeout(() => reject(new Error(`Timed out while reading "${asset.fileName}".`)), 12_000);
+            video.onloadedmetadata = () => {
+              window.clearTimeout(timeout);
+              Number.isFinite(video.duration) && video.duration > 0
+                ? resolve()
+                : reject(new Error(`Could not decode "${asset.fileName}". Choose a readable original media file.`));
+            };
+            video.onerror = () => {
+              window.clearTimeout(timeout);
+              reject(new Error(`Could not decode "${asset.fileName}". Choose a readable original media file.`));
+            };
+            video.src = url;
+          });
+        }
+      }
+    } finally {
+      temporaryUrls.forEach((url) => urlsRef.current.revoke(url));
+    }
+  };
+
+  const handleExportProjectFile = async () => {
+    setIsProjectPackageBusy(true);
+    setProjectStorageStatus('Preparing portable project file…');
+    let downloadUrl: string | null = null;
+    let link: HTMLAnchorElement | null = null;
+    try {
+      const json = await buildProjectPackage(makeProjectDocument(), makeProjectMedia());
+      downloadUrl = URL.createObjectURL(new Blob([json], { type: 'application/json;charset=utf-8' }));
+      link = document.createElement('a');
+      link.href = downloadUrl;
+      link.download = sanitizeProjectPackageFilename(projectName);
+      link.click();
+      setProjectStorageStatus(`Exported “${link.download}”. Keep this file and your original media backed up.`);
+    } catch (error) {
+      setProjectStorageStatus(error instanceof Error ? error.message : 'Could not export this project file. Your edits are still open.');
+    } finally {
+      link?.remove();
+      if (downloadUrl) URL.revokeObjectURL(downloadUrl);
+      setIsProjectPackageBusy(false);
+    }
+  };
+
+  const handleImportProjectFile = async (file?: File) => {
+    if (!file) return;
+    setIsProjectPackageBusy(true);
+    setProjectStorageStatus('Validating project package and media integrity…');
+    try {
+      if (file.size > 800 * 1024 * 1024) {
+        throw new Error('Project package exceeds this build’s import safety guard. Your current project is unchanged; try a smaller package.');
+      }
+      const imported = await parseProjectPackage(await file.text());
+      setProjectStorageStatus('Checking that imported media can be decoded…');
+      await verifyPackageMediaDecodes(imported);
+      const hasActiveWork = Boolean(
+        audioFile || assets.length || clips.length || titles.length || markers.length
+        || projectName !== 'Untitled project' || presetId !== 'youtube'
+        || customWidth !== 1920 || customHeight !== 1080 || frameRate !== 30 || format !== 'MP4',
+      );
+      if (hasActiveWork && !window.confirm(
+        'Import this project into the editor? Your current unsaved edits will be replaced. The imported project will be saved as a separate project; cancel to keep editing.',
+      )) {
+        setProjectStorageStatus('Import cancelled. Your current project and edits are unchanged.');
+        return;
+      }
+
+      const importedId = newId();
+      const importedDocument: ProjectDocument = {
+        ...imported.document,
+        id: importedId,
+      };
+      setProjectStorageStatus('Saving imported project as a separate local project…');
+      await projectStorage.saveProjectAsNew(importedDocument, imported.media);
+      await applyStoredProject({
+        ...imported,
+        document: importedDocument,
+      }, true);
+      try {
+        await refreshProjectList(importedId);
+      } catch {
+        setProjectList((current) => [{
+          id: importedId,
+          name: importedDocument.name,
+          createdAt: importedDocument.createdAt,
+          updatedAt: importedDocument.updatedAt,
+        }, ...current]);
+        setProjectToOpen(importedId);
+      }
+      setProjectStorageStatus(`Imported “${importedDocument.name}” as a separate project. It is stored in this browser; storage quota/eviction may apply, so keep the exported file backed up.`);
+    } catch (error) {
+      setProjectStorageStatus(error instanceof Error
+        ? `${error.message} Your current edits remain open.`
+        : 'Could not import this project. Your current edits remain open.');
+    } finally {
+      if (projectPackageInputRef.current) projectPackageInputRef.current.value = '';
+      setIsProjectPackageBusy(false);
+    }
+  };
+
   const handleExport = async () => {
     if (!audioFile || clips.length === 0) {
       setStatusMessage('Add a soundtrack and at least one visual clip before exporting.');
@@ -1048,7 +1179,7 @@ function App() {
               <button
                 type="button"
                 onClick={() => item.kind === 'audio' ? removeAudio() : removeVisualAsset(item.id)}
-                disabled={isExporting || isImportingVisuals}
+                disabled={isExporting || isImportingVisuals || isProjectPackageBusy}
                 aria-label={`Remove ${item.kind === 'audio' ? 'soundtrack' : 'visual asset'} ${item.file.name} from project`}
                 className="shrink-0 border border-neutral-200 px-3 py-2 text-xs font-medium text-neutral-700 hover:border-red-300 hover:text-red-800 disabled:cursor-not-allowed disabled:opacity-40"
               >
@@ -1088,24 +1219,38 @@ function App() {
             aria-label="Saved projects"
             value={projectToOpen}
             onChange={(event) => setProjectToOpen(event.target.value)}
-            disabled={!projectList.length || isExporting || isImportingVisuals}
+            disabled={!projectList.length || isExporting || isImportingVisuals || isProjectPackageBusy}
           >
             {!projectList.length && <option value="">No saved projects yet</option>}
             {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}{project.problem ? ' · needs attention' : ''}</option>)}
           </select>
         </label>
         <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => void handleSaveProject()} disabled={isExporting || isImportingVisuals || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save</button>
-          <button type="button" onClick={() => void handleSaveAs()} disabled={isExporting || isImportingVisuals || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save as</button>
-          <button type="button" onClick={() => void startNewVideo()} disabled={isExporting || isImportingVisuals || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">New</button>
-          <button type="button" onClick={() => void handleOpenProject()} disabled={!projectToOpen || isExporting || isImportingVisuals} className="bg-moss px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">Open</button>
-          <button type="button" onClick={() => void handleDeleteProject()} disabled={!projectToOpen || isExporting || isImportingVisuals} className="border border-red-200 px-3 py-2 text-xs font-semibold text-red-800 disabled:opacity-40">Delete</button>
+          <button type="button" onClick={() => void handleSaveProject()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save</button>
+          <button type="button" onClick={() => void handleSaveAs()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save as</button>
+          <button type="button" onClick={() => void startNewVideo()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">New</button>
+          <button type="button" onClick={() => void handleOpenProject()} disabled={!projectToOpen || isExporting || isImportingVisuals || isProjectPackageBusy} className="bg-moss px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">Open</button>
+          <button type="button" onClick={() => void handleDeleteProject()} disabled={!projectToOpen || isExporting || isImportingVisuals || isProjectPackageBusy} className="border border-red-200 px-3 py-2 text-xs font-semibold text-red-800 disabled:opacity-40">Delete</button>
+          <button type="button" onClick={() => void handleExportProjectFile()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">
+            {isProjectPackageBusy ? 'Working…' : 'Export project file'}
+          </button>
+          <button type="button" onClick={() => projectPackageInputRef.current?.click()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">
+            Import project file
+          </button>
+          <input
+            ref={projectPackageInputRef}
+            className="sr-only"
+            type="file"
+            accept=".stillwave.json,.json,application/json"
+            aria-label="Choose a portable project file"
+            onChange={(event) => void handleImportProjectFile(event.target.files?.[0])}
+          />
           <button type="button" onClick={undoEdit} disabled={!canUndo || isExporting || isImportingVisuals} aria-label="Undo last edit" aria-keyshortcuts="Control+Z Meta+Z" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Undo</button>
           <button type="button" onClick={redoEdit} disabled={!canRedo || isExporting || isImportingVisuals} aria-label="Redo last edit" aria-keyshortcuts="Control+Shift+Z Meta+Shift+Z Control+Y Meta+Y" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Redo</button>
         </div>
         <div className="md:col-span-3">
           <p role="status" aria-live="polite" className="text-xs text-neutral-600">{projectStorageStatus}</p>
-          <p className="mt-1 text-[11px] text-neutral-500">Projects and source media stay in this browser only. Browser storage can be limited or evicted; there is no cloud sync. Keep your original files backed up.</p>
+          <p className="mt-1 text-[11px] text-neutral-500">Projects and source media stay in this browser only. Browser storage can be limited or evicted; there is no cloud sync. Imported projects use additional local storage. Keep your portable project file and original media backed up.</p>
           <p className="mt-1 text-[11px] text-neutral-500">Undo: Ctrl/⌘+Z · Redo: Ctrl/⌘+Shift+Z or Ctrl/⌘+Y. Editing shortcuts are inactive in text fields.</p>
         </div>
       </section>

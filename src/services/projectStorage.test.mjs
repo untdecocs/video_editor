@@ -9,6 +9,14 @@ class MemoryBackend {
   async list() { return [...this.records.values()]; }
   async get(id) { return this.records.get(id); }
   async put(id, value) { this.records.set(id, structuredClone(value)); }
+  async add(id, value) {
+    if (this.records.has(id)) {
+      const error = new Error('Key already exists');
+      error.name = 'ConstraintError';
+      throw error;
+    }
+    this.records.set(id, structuredClone(value));
+  }
   async delete(id) { this.records.delete(id); }
 }
 
@@ -120,6 +128,20 @@ test('deletes only the selected saved project record', async () => {
 
   assert.equal(backend.records.has(first.id), false);
   assert.equal((await storage.loadProject(second.id)).document.name, 'Other cut');
+});
+
+test('saveProjectAsNew refuses to overwrite an existing project ID', async () => {
+  const backend = new MemoryBackend();
+  const storage = createProjectStorage(backend);
+  const original = project();
+  await storage.saveProject(original, media());
+
+  await assert.rejects(
+    storage.saveProjectAsNew({ ...original, name: 'Imported copy' }, media()),
+    /already uses this new ID/,
+  );
+  assert.equal((await storage.loadProject(original.id)).document.name, original.name);
+  assert.equal(backend.records.size, 1);
 });
 
 test('turns browser quota failures into actionable feedback', async () => {

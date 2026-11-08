@@ -2,7 +2,17 @@
 
 **Assessment date:** 2026-11-02
 **Scope:** Existing test evidence, Phase 1 toolchain validation, DATA-01 model validation, and the proposed quality strategy for the roadmap.
-**Tester availability:** A Tester agent is now available and completed a bounded QA-01 run in the integrated Windows Electron/Chromium browser. Phase 0 used Backend and Frontend read-only assessments; QA-01 remains in progress because the run found an open defect and did not cover the full browser/export matrix.
+**Tester availability:** A Tester agent completed baseline QA and a portable-project-package validation in integrated Chromium. This file retains the historical assessment below and adds the 2026-11-08 decisions and evidence.
+
+## Production compatibility and portability follow-up — 2026-11-08
+
+**Approved target matrix:** Latest two stable desktop releases of Chrome, Edge, and Firefox on Windows 11; Safari on the current and previous macOS major releases. Mobile/tablet are out of scope. Native Chrome/Edge have only initial-page headless smoke evidence; Firefox/Safari were unavailable. Integrated Electron/Chromium results do not substitute for native-browser validation.
+
+**Other recorded decisions:** Portable downloadable project export/import is required before launch. Commercial scope is free beta with no payments, accounts, or cloud features. Public production is the intended target, but keep the release private until the actual production URL and CTA are supplied. No numeric media limits are approved; the authorized benchmark is for representative evidence and recommendations only. Legal/privacy owner remains unassigned.
+
+**PORT-01 test evidence:** `npm test` passes 69/69 and `npm run build` passes. Node tests cover full project metadata/source-media roundtrip, SHA-256 integrity, malformed/unknown versions, unsafe filenames, MIME mismatches, bad base64/size, missing/extra/duplicate records, an 8 MiB regression case, and non-canonical padding. Tester integrated-Chromium checks covered a synthetic WAV/PNG export Blob, independently calculated media hashes and signatures, new-ID import, metadata/media recovery after reload, malformed-file preservation, and cancellation without modifying the active project. Four browser checks passed; one disk-download event/read-back was blocked by the harness. No downloaded project file was independently inspected.
+
+**Representative package benchmark (not a browser/media-decoder benchmark):** Windows 10 build 19045 x64; AMD Ryzen 5 5500, 12 logical CPUs, 16,168 MiB RAM; Node 24.12.0. Generated silent stereo PCM WAV fixtures at 44.1 kHz/16-bit were 1, 8, and 32 MiB (5.9, 47.6, and 190.2 seconds). Resulting JSON packages were 1.33, 10.67, and 42.67 MiB; build times 53.6, 377.7, and 1,512 ms; parse times 17.5, 106.4, and 283.4 ms; sampled RSS increases 21.5, 123.9, and 377.6 MiB. This single Node environment does not establish practical browser, video-decode, export, or universal media limits. Current internal package safety guards are implementation bounds—not user-approved supported media limits. Do not publish numeric limits without representative native-browser measurement and product approval.
 
 ## Phase 0 validation performed
 
@@ -61,6 +71,7 @@ Record browser/OS/version, source fixtures, selected settings, expected result, 
 |---|---|
 | Project model | Schema validation, stable IDs, serialization round-trip, unknown/invalid version handling, migration fixtures. |
 | Persistence/recovery | Save/open/reload, interrupted write or storage unavailable, missing media, project integrity after failed export. |
+| Portable project package | Complete metadata/media roundtrip; format/schema version rejection; filename/MIME/content checks; per-media integrity and byte lengths; missing/extra/duplicate entries; cancel/malformed/quota failures preserve active and saved projects; import uses a distinct saved-project ID; verify downloaded file from disk and reload it. |
 | Editing history | Ordered undo/redo of each supported edit command, bounded history behavior, no unintended cross-project state mutation. |
 | Multi-track timeline | Unit tests for coordinate/time conversion and operations; UI tests for selection/drag/trim/split/snap; overlap and boundary cases. |
 | Preview synchronization | Browser tests with known-duration audio/video; seeks at clip boundaries; measured sync tolerance; decode errors and timeouts. |
@@ -81,14 +92,16 @@ Record browser/OS/version, source fixtures, selected settings, expected result, 
 ## Outstanding test blockers
 
 1. No repository-managed browser/E2E harness is available. QA-01 used the integrated browser automation tool for a one-off run; the Tester role is available for follow-up.
-2. Target browser/OS matrix and project persistence scope have not been approved (`PROD-01`).
-3. QA-01 generated and browser-decoded a 67,542-byte MP4 Blob, but the integrated browser did not expose a download event or persisted file for independent on-disk inspection. No FFmpeg/FFprobe binary was available.
+2. The approved browser/OS matrix is not yet executed end-to-end in native browsers; native Chrome/Edge evidence remains first-screen only and Firefox/Safari are unavailable.
+3. QA-01 generated and browser-decoded a 67,542-byte MP4 Blob, but the integrated browser did not expose a download event or persisted file for independent on-disk inspection. The package roundtrip similarly inspected its Blob, not a disk-saved file. No FFmpeg/FFprobe binary was available.
+4. No numeric product media limits are approved; the single-machine Node package benchmark is not sufficient to recommend universal or browser-supported caps.
+5. Production URL/CTA is still required before release can leave private status; legal/privacy owner is unassigned.
 
 ## QA-01 baseline characterization
 
 **Run date:** 2026-11-02
 **Status:** Partial; detailed results and case-by-case gaps are in `TEST_RESULTS.md`.
-**Follow-up (2026-11-04):** A current-workflow integrated Chromium pass ran 16 checks (12 passed, 1 failed, 3 blocked); the Save As selector failure was fixed and passed a focused 4/4 retest. Timeline marker behavior passed 8/8 focused cases, including undo/redo and persistence/recovery. The current automated suite passes 43/43 and the production build passes. Full QA remains partial because no downloaded output file was captured for independent validation and native Chrome/Edge/Firefox/Safari remain unavailable. See `TEST_RESULTS.md` and `BUG_REPORTS.md`.
+**Follow-up (2026-11-04):** A current-workflow integrated Chromium pass ran 16 checks (12 passed, 1 failed, 3 blocked); the Save As selector failure was fixed and passed a focused 4/4 retest. Timeline marker behavior passed 8/8 focused cases, including undo/redo and persistence/recovery. These were point-in-time counts; see the 2026-11-08 follow-up above and `TEST_RESULTS.md` for current validation. Full QA remains partial because native browser workflows and a disk-saved output file remain unverified. See `BUG_REPORTS.md`.
 **MEDIA-01 follow-up (2026-11-04):** Extension/MIME checks and a searchable asset library passed focused synthetic-media Chromium checks; malformed video errors now complete promptly and URLs are cleaned. Video/audio metadata no-event timeouts and cleanup are unit-tested but were not forced in the browser. A valid decodable video fixture and other browsers remain unverified. Latest automated suite: 54/54; build passes.
 **PREV-01 follow-up (2026-11-04):** Preview state now distinguishes empty project/gap/hidden track and reports video loading/error/playback rejection; inactive layers pause. Integrated Chromium passed 5 checks and blocked 3 video-specific checks (no decodable video fixture and browser page access issue). No A/V sync or frame-accuracy claim. Latest automated suite: 56/56; build passes; see `TEST_RESULTS.md`.
 **Observed environment:** Windows host, integrated Electron 43.8.3 / Chromium 150.0.7871.250, Node 24.12.0, app package 1.0.0. This is not a native Chrome/Edge/Firefox/Safari compatibility run.

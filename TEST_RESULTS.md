@@ -1,4 +1,91 @@
-# QA-01 Baseline Characterization Results
+# QA-01 Baseline Characterization and Production Follow-ups
+
+## Portable project package and user launch decisions — 2026-11-08
+
+### Decisions recorded
+
+- Intended target is public production, but keep the release private until the actual production URL and approved CTA are supplied.
+- Browser target: latest two stable desktop releases of Chrome, Edge, and Firefox on Windows 11; Safari on current and previous macOS major releases. Mobile/tablet are out of scope.
+- Portable downloadable project export/import is required before launch.
+- Commercial scope is free beta; no payments, accounts, or cloud features.
+- Representative media benchmarking and conservative recommendations are authorized, but no numeric media limits are approved.
+- Legal/privacy owner remains unassigned.
+
+### Automated verification
+
+| Check | Result |
+|---|---|
+| `npm test` | **69 passed, 0 failed** after adding package validation tests and the large-payload parser regression. |
+| `npm run build` | **Passed** (TypeScript and Vite production build). |
+| `npm ls --depth=0` | **Passed**, no invalid/missing direct dependencies. |
+| `npm audit` | **0 vulnerabilities** reported. |
+| `git diff --check` | **Passed**. |
+
+### Portable package browser validation
+
+Tester exercised the export/import flow in integrated Chromium with synthetic 0.5-second WAV audio (22,094 bytes) and 64×48 PNG image (273 bytes), plus a clip, title, marker, and custom output settings. Export generated a 31,657-byte JSON Blob. The browser tooling did not provide a download event or disk-read access, so the exact Blob was inspected instead of an on-disk file.
+
+The two package media records had independently recomputed SHA-256 digests matching the package. Audio bytes began with RIFF/WAVE and image bytes with PNG signatures. Project schema v5 metadata, edits, markers, and WebM/custom output settings were present. Import created a new project ID and preserved the original saved project; imported metadata and media were stored in IndexedDB and the imported project recovered after reload with its title and visual asset. Malformed JSON and canceled import both left active edits and existing saved-project records unchanged.
+
+**Result:** Four browser checks passed; one disk-download/read-back check was blocked by the harness. This was integrated Chromium, not native Chrome/Edge/Firefox/Safari validation. No product defect was found in the exercised flows.
+
+### Parser scaling defect and fix
+
+A Node benchmark initially reproduced a `RangeError: Maximum call stack size exceeded` in whole-string base64 regex validation on an 8 MiB media payload (1 MiB parsed successfully). The Frontend agent replaced the large regex/`atob` path with bounded manual base64 validation/decoding and added 8 MiB roundtrip, malformed-payload, and non-canonical-padding tests. Independent follow-up `npm test` passed **69/69**, including the 8 MiB case, and the production build passed.
+
+### Representative package benchmark
+
+This measured package JSON/base64 construction and parsing, not browser media import/decode, video export, or universal support limits.
+
+| Environment / synthetic media | JSON package size (expansion) | Build | Parse | Sampled peak RSS increase |
+|---|---:|---:|---:|---:|
+| 1 MiB / 5.9 sec silent stereo PCM WAV | 1.33 MiB (1.33×) | 53.6 ms | 17.5 ms | 21.5 MiB |
+| 8 MiB / 47.6 sec silent stereo PCM WAV | 10.67 MiB (1.33×) | 377.7 ms | 106.4 ms | 123.9 MiB |
+| 32 MiB / 190.2 sec silent stereo PCM WAV | 42.67 MiB (1.33×) | 1,512 ms | 283.4 ms | 377.6 MiB |
+
+Measured host: Windows 10 build 19045 x64; AMD Ryzen 5 5500, 12 logical CPUs, 16,168 MiB RAM; Node v24.12.0. Cases ran in separate Node processes; RSS was sampled at 1 ms intervals, so transient peaks may be missed. This one-machine Node benchmark is **insufficient to recommend numeric user-facing media limits** or claim browser support. Current implementation guards of 256 MiB per media, 512 MiB total source media, and 800 MiB package file are implementation safety bounds only; they are not user-approved product limits and require browser-memory review.
+
+**Integrity scope:** SHA-256 covers each source-media payload. The project document receives strict version/schema validation but is not cryptographically signed or authenticated; hashes do not establish package provenance.
+
+**Open validation:** Download and independently inspect a project package from disk; exercise approved target browsers/OSes; characterize browser memory for representative audio/image/video projects; reproduce the native Chrome synthetic-WAV metadata timeout; assign legal/privacy owner; supply production URL/CTA and explicit release authorization. The current benchmark is insufficient to recommend numeric product media limits. Official status remains **NOT READY**; keep release private.
+
+## Initial production readiness checkpoint — 2026-11-08 (before package implementation)
+
+**Scope:** Point 4, “Close product and compatibility gaps.” No product source code was changed.
+
+### Environment and current checks
+
+| Item | Result |
+|---|---|
+| Worktree at assessment start | Clean on `main`, commit `9600cff`. |
+| Runtime | Node 24.12.0; npm 11.6.2. |
+| Automated tests | `npm test`: **59 passed, 0 failed**. |
+| Production build | `npm run build`: TypeScript build and Vite 8.3.5 production build passed. |
+| Direct dependencies | `npm ls --depth=0`: no invalid/missing direct dependencies. |
+| Dependency audit | `npm audit`: **0 vulnerabilities** reported. |
+| Native Chrome | 157.0.8103.38; isolated headless production-preview smoke rendered the expected title and React editor screen. |
+| Native Edge | 157.0.4341.42; isolated headless production-preview smoke rendered the expected title and React editor screen. |
+| Other targets | Firefox and Safari executables were not found. The exact Windows OS build was not recorded. |
+
+Chrome/Edge smoke only proves initial-page loading in those observed builds; it does not establish media, persistence, export, or release compatibility. Integrated Electron/Chromium is also not a substitute for native browsers.
+
+### Responsive/accessibility spot check
+
+In the integrated VS Code Electron/Chromium browser, the production preview was checked at viewport widths **320, 375, 390, 768, and 1280 CSS pixels**. Document/body scroll width did not exceed the viewport at any tested width. The initial page exposed one `main` landmark and one `h1`; the project-name and audio-file controls had accessible names. This is a limited initial-screen spot check, **not** a WCAG conformance audit or a full editor/timeline, keyboard, screen-reader, zoom, contrast, or native-browser check.
+
+### Native Chrome synthetic-audio follow-up
+
+A Tester run used an isolated Chrome 157 profile, a synthetic 3-second PCM WAV, and the production preview. Audio metadata did not arrive before the application timeout; the observer reported `readyState=0`, and the app did not accept the soundtrack. The run did not proceed to media-containing project recovery or export.
+
+The same isolated run saved an empty project named `QA-temp-recovery`, reloaded the page, and observed the project name and one IndexedDB record still present. The record contained no audio or visual assets, and the page did not show an explicit recovery status. This is evidence for empty-project metadata persistence only, not for recovery of edits/media or crash/eviction resilience.
+
+**Classification:** one native-Chrome media-import observation requiring reproduction. It is not yet a confirmed product defect; fixture, browser-automation, and application causes were not isolated. No downloaded export file was produced or independently inspected. FFmpeg/FFprobe were unavailable.
+
+### Launch-readiness interpretation
+
+Current automated/build/dependency checks pass, and current Chrome/Edge can render the initial production screen. The exact supported browser/OS matrix, measured media limits, portable project-file requirement, actual launch URL/CTA, legal/privacy ownership, and commercial scope remain unapproved. Native Firefox/Safari are unavailable in this environment. End-to-end browser export and downloaded-file validation remain outstanding. See `LAUNCH_READINESS_REPORT.md` for the complete readiness decision, open decisions, owners, and launch checklist. **Official production launch status: NOT READY.**
+
+---
 
 **Run date:** 2026-11-02
 **Scope:** Existing audio/image/video import, clip order and timing, split, transforms, preview/playback, and current export success/error handling. No product code was changed.
