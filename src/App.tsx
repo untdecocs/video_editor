@@ -118,6 +118,7 @@ function App() {
   const [format, setFormat] = useState('MP4');
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
+  const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
   const [statusMessage, setStatusMessage] = useState('');
   const [assetSearch, setAssetSearch] = useState('');
   const [isImportingVisuals, setIsImportingVisuals] = useState(false);
@@ -127,6 +128,8 @@ function App() {
   const [exportComplete, setExportComplete] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const mainRef = useRef<HTMLElement | null>(null);
+  const projectMenuRef = useRef<HTMLDivElement | null>(null);
+  const projectMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const exportButtonRef = useRef<HTMLButtonElement | null>(null);
   const wasExportingRef = useRef(false);
   const visualImportRef = useRef(false);
@@ -844,6 +847,21 @@ function App() {
     return () => window.removeEventListener('keydown', handleHistoryShortcut);
   }, [isExporting]);
 
+  useEffect(() => {
+    if (!isProjectMenuOpen) return;
+    const handleDocumentPointerDown = (event: MouseEvent) => {
+      const target = event.target as Node | null;
+      if (!target) return;
+      const clickedInsideMenu = projectMenuRef.current?.contains(target);
+      const clickedMenuButton = projectMenuButtonRef.current?.contains(target);
+      if (!clickedInsideMenu && !clickedMenuButton) {
+        setIsProjectMenuOpen(false);
+      }
+    };
+    document.addEventListener('mousedown', handleDocumentPointerDown);
+    return () => document.removeEventListener('mousedown', handleDocumentPointerDown);
+  }, [isProjectMenuOpen]);
+
   const resetProjectState = () => {
     audioRef.current?.pause();
     audioRef.current?.removeAttribute('src');
@@ -887,8 +905,12 @@ function App() {
   };
 
   const startNewVideo = async () => {
+    const hasUnsavedChanges = Boolean(audioFile || assets.length || clips.length || titles.length || markers.length);
+    if (hasUnsavedChanges && !window.confirm('Create a new project? The current project will be saved in this browser before starting fresh.')) {
+      return;
+    }
     try {
-      if (audioFile || assets.length || clips.length) await saveCurrentProject();
+      if (hasUnsavedChanges) await saveCurrentProject();
       resetProjectState();
       setProjectStorageStatus('New project. It will autosave here after you add media.');
     } catch (error) {
@@ -1133,6 +1155,34 @@ function App() {
     setIsPlaying((playing) => !playing);
   };
 
+  const projectStatusLabel = projectStorageStatus.toLowerCase().includes('saving') || projectStorageStatus.toLowerCase().includes('could not') || projectStorageStatus.toLowerCase().includes('needs attention') ? 'Unsaved changes' : 'All changes saved';
+
+  const menuGroups = [
+    {
+      label: 'PROJECT',
+      items: [
+        { label: 'New project', icon: '✦', onClick: () => void startNewVideo(), disabled: isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady },
+        { label: 'Open project', icon: '↗', onClick: () => void handleOpenProject(), disabled: !projectToOpen || isExporting || isImportingVisuals || isProjectPackageBusy },
+        { label: 'Save as…', icon: '⎘', onClick: () => void handleSaveAs(), disabled: isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady },
+        { label: 'Delete project', icon: '⌫', onClick: () => void handleDeleteProject(), disabled: !projectToOpen || isExporting || isImportingVisuals || isProjectPackageBusy },
+      ],
+    },
+    {
+      label: 'EDIT',
+      items: [
+        { label: 'Undo', icon: '↶', onClick: undoEdit, disabled: !canUndo || isExporting || isImportingVisuals },
+        { label: 'Redo', icon: '↷', onClick: redoEdit, disabled: !canRedo || isExporting || isImportingVisuals },
+      ],
+    },
+    {
+      label: 'FILE',
+      items: [
+        { label: 'Import project', icon: '⇩', onClick: () => projectPackageInputRef.current?.click(), disabled: isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady },
+        { label: 'Export project', icon: '⇪', onClick: () => void handleExportProjectFile(), disabled: isExporting || isImportingVisuals || isProjectPackageBusy },
+      ],
+    },
+  ];
+
   const mediaLibrary = (
     <section aria-labelledby="asset-library-heading" className="border border-neutral-200 bg-white/70 p-4">
       <div className="flex flex-wrap items-start justify-between gap-3">
@@ -1200,59 +1250,100 @@ function App() {
         </a>
         <span className="text-xs text-neutral-500">SOCIAL VIDEO STUDIO</span>
       </header>
-      <section aria-label="Project management" className="mx-auto grid max-w-[1500px] gap-3 border-b border-neutral-200 bg-white/60 px-5 py-4 md:grid-cols-[minmax(180px,1fr)_minmax(180px,1fr)_auto] md:items-end md:px-10">
-        <label className="block text-xs font-medium text-neutral-600">
-          Project name
-          <input
-            className="mt-1 w-full border border-neutral-200 bg-white px-3 py-2 text-sm text-ink"
-            aria-label="Project name"
-            maxLength={100}
-            value={projectName}
-            onChange={(event) => setProjectName(event.target.value)}
-            disabled={isExporting || isImportingVisuals}
-          />
-        </label>
-        <label className="block text-xs font-medium text-neutral-600">
-          Saved projects
-          <select
-            className="mt-1 w-full border border-neutral-200 bg-white px-3 py-2 text-sm text-ink"
-            aria-label="Saved projects"
-            value={projectToOpen}
-            onChange={(event) => setProjectToOpen(event.target.value)}
-            disabled={!projectList.length || isExporting || isImportingVisuals || isProjectPackageBusy}
-          >
-            {!projectList.length && <option value="">No saved projects yet</option>}
-            {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}{project.problem ? ' · needs attention' : ''}</option>)}
-          </select>
-        </label>
-        <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={() => void handleSaveProject()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save</button>
-          <button type="button" onClick={() => void handleSaveAs()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">Save as</button>
-          <button type="button" onClick={() => void startNewVideo()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">New</button>
-          <button type="button" onClick={() => void handleOpenProject()} disabled={!projectToOpen || isExporting || isImportingVisuals || isProjectPackageBusy} className="bg-moss px-3 py-2 text-xs font-semibold text-white disabled:opacity-40">Open</button>
-          <button type="button" onClick={() => void handleDeleteProject()} disabled={!projectToOpen || isExporting || isImportingVisuals || isProjectPackageBusy} className="border border-red-200 px-3 py-2 text-xs font-semibold text-red-800 disabled:opacity-40">Delete</button>
-          <button type="button" onClick={() => void handleExportProjectFile()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">
-            {isProjectPackageBusy ? 'Working…' : 'Export project file'}
-          </button>
-          <button type="button" onClick={() => projectPackageInputRef.current?.click()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady} className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:opacity-40">
-            Import project file
-          </button>
-          <input
-            ref={projectPackageInputRef}
-            className="sr-only"
-            type="file"
-            accept=".stillwave.json,.json,application/json"
-            aria-label="Choose a portable project file"
-            onChange={(event) => void handleImportProjectFile(event.target.files?.[0])}
-          />
-          <button type="button" onClick={undoEdit} disabled={!canUndo || isExporting || isImportingVisuals} aria-label="Undo last edit" aria-keyshortcuts="Control+Z Meta+Z" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Undo</button>
-          <button type="button" onClick={redoEdit} disabled={!canRedo || isExporting || isImportingVisuals} aria-label="Redo last edit" aria-keyshortcuts="Control+Shift+Z Meta+Shift+Z Control+Y Meta+Y" className="border border-neutral-300 px-3 py-2 text-xs font-semibold text-ink disabled:cursor-not-allowed disabled:opacity-40">Redo</button>
+      <section aria-label="Project management" className="mx-auto border-b border-neutral-200 bg-white/60 px-5 py-4 md:px-10">
+        <div className="mx-auto flex max-w-[1500px] flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
+          <div className="flex-1 space-y-3">
+            <label className="block text-xs font-medium text-neutral-600">
+              Project name
+              <input
+                className="mt-1 w-full border border-neutral-200 bg-white px-3 py-2 text-sm text-ink"
+                aria-label="Project name"
+                maxLength={100}
+                value={projectName}
+                onChange={(event) => setProjectName(event.target.value)}
+                disabled={isExporting || isImportingVisuals}
+              />
+            </label>
+            <div className="flex flex-wrap items-center gap-3">
+              <label className="block min-w-0 flex-1 text-xs font-medium text-neutral-600">
+                Saved projects
+                <select
+                  className="mt-1 w-full border border-neutral-200 bg-white px-3 py-2 text-sm text-ink"
+                  aria-label="Saved projects"
+                  value={projectToOpen}
+                  onChange={(event) => setProjectToOpen(event.target.value)}
+                  disabled={!projectList.length || isExporting || isImportingVisuals || isProjectPackageBusy}
+                >
+                  {!projectList.length && <option value="">No saved projects yet</option>}
+                  {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}{project.problem ? ' · needs attention' : ''}</option>)}
+                </select>
+              </label>
+              <span className="inline-flex items-center rounded-full border border-neutral-200 bg-neutral-50 px-2.5 py-1 text-[11px] font-medium text-neutral-600">
+                {projectStatusLabel}
+              </span>
+            </div>
+          </div>
+          <div className="flex items-center gap-3 self-end">
+            <button type="button" onClick={() => void handleSaveProject()} disabled={isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady} className="bg-moss px-4 py-2.5 text-xs font-semibold text-white shadow-sm transition hover:bg-moss/90 disabled:cursor-not-allowed disabled:opacity-40">Save</button>
+            <div className="relative">
+              <button
+                ref={projectMenuButtonRef}
+                type="button"
+                aria-label="Open project menu"
+                aria-expanded={isProjectMenuOpen}
+                onClick={() => setIsProjectMenuOpen((open) => !open)}
+                className="grid h-10 w-10 place-items-center rounded-md border border-neutral-200 bg-white text-neutral-700 shadow-sm transition hover:border-neutral-300 hover:text-ink"
+              >
+                <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-current">
+                  <circle cx="12" cy="5.5" r="1.5" />
+                  <circle cx="12" cy="12" r="1.5" />
+                  <circle cx="12" cy="18.5" r="1.5" />
+                </svg>
+              </button>
+              {isProjectMenuOpen && (
+                <div ref={projectMenuRef} className="absolute right-0 top-full z-30 mt-2 w-64 overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-xl">
+                  {menuGroups.map((group, index) => (
+                    <div key={group.label}>
+                      <div className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-400">{group.label}</div>
+                      <div className="px-1 pb-1">
+                        {group.items.map((item) => (
+                          <button
+                            key={item.label}
+                            type="button"
+                            onClick={() => {
+                              if (!item.disabled) {
+                                item.onClick();
+                                setIsProjectMenuOpen(false);
+                              }
+                            }}
+                            disabled={item.disabled}
+                            className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-sm text-neutral-700 transition hover:bg-neutral-50 disabled:cursor-not-allowed disabled:text-neutral-400"
+                          >
+                            <span aria-hidden="true" className="grid h-5 w-5 place-items-center text-xs text-neutral-500">{item.icon}</span>
+                            <span>{item.label}</span>
+                          </button>
+                        ))}
+                      </div>
+                      {index < menuGroups.length - 1 && <div className="mx-2 h-px bg-neutral-200" />}
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
         </div>
-        <div className="md:col-span-3">
+        <div className="mx-auto mt-4 max-w-[1500px]">
           <p role="status" aria-live="polite" className="text-xs text-neutral-600">{projectStorageStatus}</p>
-          <p className="mt-1 text-[11px] text-neutral-500">Projects and source media stay in this browser only. Browser storage can be limited or evicted; there is no cloud sync. Imported projects use additional local storage. Keep your portable project file and original media backed up.</p>
-          <p className="mt-1 text-[11px] text-neutral-500">Undo: Ctrl/⌘+Z · Redo: Ctrl/⌘+Shift+Z or Ctrl/⌘+Y. Editing shortcuts are inactive in text fields.</p>
+          <p className="mt-1 text-[11px] text-neutral-500">Your projects are saved in this browser.</p>
         </div>
+        <input
+          ref={projectPackageInputRef}
+          className="sr-only"
+          type="file"
+          accept=".stillwave.json,.json,application/json"
+          aria-label="Choose a portable project file"
+          onChange={(event) => void handleImportProjectFile(event.target.files?.[0])}
+        />
       </section>
       <main ref={mainRef} className="mx-auto max-w-[1500px] px-5 pb-12 pt-6 md:px-10 md:pt-10">
         <div className="mb-8 flex flex-wrap items-end justify-between gap-5">

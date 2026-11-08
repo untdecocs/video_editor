@@ -1,5 +1,64 @@
 # QA-01 Baseline Characterization and Production Follow-ups
 
+## Launch gate #2 — native browser/OS workflow attempt — 2026-11-08
+
+**Disposition:** **BLOCKED / NOT CLOSED.** This attempt did not validate the approved Windows 11/macOS matrix. It used the actual installed desktop Chrome and Edge executables (not Electron and not headless) on the available Windows 10 host. Successful exploratory cases on that unsupported OS are not compatibility signoff.
+
+### Environment and fixtures
+
+| Item | Observed |
+|---|---|
+| OS | Windows 10 Pro 22H2, version 10.0.19045, build **19045.6466**, 64-bit. Windows 11 and macOS hosts were not available. |
+| Native Chrome | **157.0.8103.38**, `C:\Program Files\Google\Chrome\Application\chrome.exe`. |
+| Native Edge | **157.0.4341.42**, `C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe`. |
+| Firefox / Safari | No Firefox executable was found via PATH, common Program Files locations, or StartMenuInternet registry entries. Safari/macOS was unavailable on this Windows host. |
+| Installed release coverage | Only one Chrome and one Edge build were available; a second stable build for either browser was not installed. Installed versions are recorded exactly, not asserted to be the latest two stable releases. |
+| Application | Temporary Vite dev server at `http://127.0.0.1:4173/`, bound to loopback; server stopped after testing. Each browser used a unique temporary profile and download directory. |
+| Synthetic audio | `synthetic-audio.wav`, 264,644 bytes; Python `wave` independently read PCM, mono, 16-bit, 44,100 Hz, 132,300 frames (3 seconds), uncompressed. A browser-generated AAC/M4A was also tried in Edge, without successful app metadata import. |
+| Synthetic visuals | 160×90 PNG, 302 bytes. A native-browser MediaRecorder-generated WebM video fixture (about 1.6 seconds; 3,186 bytes in Chrome and 3,188 bytes in Edge) was also used. The source WebM was imported in Chrome; it is not an application export. |
+| Media inspection tools | FFmpeg/FFprobe were not available. No application-produced export file was downloaded. |
+
+### Executed cases
+
+| Test ID | Browser / workflow | Actual result | Status |
+|---|---|---|---|
+| NBR-CH-SMOKE-001 | Chrome initial-page smoke | Native Chrome loaded the local application title and React editor/project controls. This is page-load smoke only. | **PASS** |
+| NBR-ED-SMOKE-001 | Edge initial-page smoke | Native Edge loaded the local application title and React editor/project controls. This is page-load smoke only. | **PASS** |
+| NBR-CH-AUDIO-001 | Chrome WAV import | One isolated Chrome profile reported `Loaded synthetic-audio.wav` and enabled continuation. A repeat from a fresh profile timed out; an independent audio-element probe on the same validated WAV remained at `readyState=0`, `networkState=2`. Import was not reproducible. | **FAIL** |
+| NBR-CH-VISUAL-001 | Chrome image/video import | Imported the synthetic PNG and WebM; the editor listed both media items and added two visual clips (image 5.0 s; video about 1.6 s). | **PASS** |
+| NBR-CH-EDIT-001 | Chrome basic editing and preview | Added/edited a title, sought the preview, and played/paused. The play control entered the playing state and the soundtrack time advanced to about 1.17 s. This does not verify title rendering in an export. | **PASS** |
+| NBR-CH-SAVE-001 | Chrome project save | UI reported `Saved “Gate 2 Chrome QA” in this browser.` An isolated IndexedDB inspection found the named project, soundtrack Blob, two visual media Blobs, two clips, and title data. | **PASS** |
+| NBR-CH-REC-001 | Chrome reload/recovery | After reload and again in a newly opened native Chrome tab, the app remained at `Checking local project storage…`, showed the default project name/audio step, and did not apply the saved project. The saved project remained in the isolated IndexedDB record. | **FAIL** |
+| NBR-CH-EXP-001 | Chrome application export | Not reached reliably: audio import was inconsistent and media-containing recovery did not complete. The downloaded synthetic WebM fixture is not an application export. | **BLOCKED** |
+| NBR-ED-AUDIO-001 | Edge audio import | The validated WAV import timed out with `Timed out while reading audio metadata`; an additional synthetic AAC/M4A attempt also timed out in the app. No soundtrack was accepted. | **FAIL** |
+| NBR-ED-VISUAL-001 | Edge image/video import | Not reached because the soundtrack prerequisite failed. | **BLOCKED** |
+| NBR-ED-EDIT-001 | Edge editing/preview | Not reached because the soundtrack prerequisite failed. | **BLOCKED** |
+| NBR-ED-PERSIST-001 | Edge save/reload/recovery | Not reached because no project could be created from the failed soundtrack import. | **BLOCKED** |
+| NBR-ED-EXP-001 | Edge application export | Not reached because the soundtrack prerequisite failed. | **BLOCKED** |
+
+### Approved matrix availability
+
+| Approved target | Result | Environment evidence |
+|---|---|---|
+| Chrome, latest stable release, Windows 11 | **BLOCKED** | Chrome 157.0.8103.38 was available only on Windows 10 Pro 22H2 build 19045.6466; Windows 11 was unavailable and release recency was not independently confirmed. Exploratory workflows above are not target signoff. |
+| Chrome, previous stable release, Windows 11 | **BLOCKED** | No second Chrome build or Windows 11 host available. |
+| Edge, latest stable release, Windows 11 | **BLOCKED** | Edge 157.0.4341.42 was available only on Windows 10 Pro 22H2 build 19045.6466; Windows 11 was unavailable and release recency was not independently confirmed. Exploratory workflows above are not target signoff. |
+| Edge, previous stable release, Windows 11 | **BLOCKED** | No second Edge build or Windows 11 host available. |
+| Firefox, latest and previous stable releases, Windows 11 | **BLOCKED** | No Firefox executable/build available; Windows 11 host unavailable. |
+| Safari, current and previous macOS major releases | **BLOCKED** | No macOS host or Safari executable available. |
+
+### Execution totals and limits
+
+| Metric | Result |
+|---|---:|
+| Workflow cases | 13 |
+| Passed | 5 |
+| Failed | 3 |
+| Blocked | 5 |
+| Not tested | 0 within the 13 listed workflow cases |
+
+The two initial-page smoke passes are explicitly separate from editing, persistence, and export coverage. Mobile/tablet were out of scope. The native browser sessions, isolated profiles, synthetic fixtures, downloads, and temporary localhost server were closed/stopped and removed after the attempt. No application source code changed; automated tests/build were not rerun because this was a documentation-only QA update.
+
 ## Portable project package and user launch decisions — 2026-11-08
 
 ### Decisions recorded
