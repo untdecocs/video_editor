@@ -1,3 +1,5 @@
+import { PORTABLE_PACKAGE_SAFETY_LIMITS } from './mediaSafetyLimits.js';
+
 export type PlatformPreset = {
   id: string;
   platform: string;
@@ -52,8 +54,8 @@ export type TimelineMarker = {
   label: string;
 };
 
-export const MAX_TIMELINE_MARKER_TIME = 86_400;
-export const MAX_TIMELINE_DURATION = 86_400;
+export const MAX_TIMELINE_MARKER_TIME = PORTABLE_PACKAGE_SAFETY_LIMITS.maxTimelineDurationSeconds;
+export const MAX_TIMELINE_DURATION = PORTABLE_PACKAGE_SAFETY_LIMITS.maxTimelineDurationSeconds;
 export const MIN_STILL_DURATION = 0.1;
 export const MAX_TIMELINE_MARKER_LABEL_LENGTH = 80;
 

@@ -44,7 +44,7 @@ test('resolves metadata and removes listeners without tearing down a successful 
   assert.equal(video.listeners.get('loadedmetadata').size, 0);
   assert.equal(video.listeners.get('error').size, 0);
   assert.deepEqual(video.removedAttributes, []);
-  assert.equal(video.loads, 0);
+  assert.equal(video.loads, 1);
 });
 
 test('times out, removes listeners, and tears down the failed source', async () => {
@@ -54,7 +54,7 @@ test('times out, removes listeners, and tears down the failed source', async () 
   await assert.rejects(result, /Timed out while reading video metadata/);
   assert.equal(video.src, '');
   assert.deepEqual(video.removedAttributes, ['src']);
-  assert.equal(video.loads, 1);
+  assert.equal(video.loads, 2);
   assert.equal(video.listeners.get('loadedmetadata').size, 0);
   assert.equal(video.listeners.get('error').size, 0);
 });
@@ -66,7 +66,7 @@ test('decode errors tear down the source and reject with an actionable reason', 
 
   await assert.rejects(result, /could not decode this video/i);
   assert.equal(video.src, '');
-  assert.equal(video.loads, 1);
+  assert.equal(video.loads, 2);
   assert.equal(video.listeners.get('loadedmetadata').size, 0);
   assert.equal(video.listeners.get('error').size, 0);
 });

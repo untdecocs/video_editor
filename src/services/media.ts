@@ -1,11 +1,13 @@
-export const audioFormats = ['MP3', 'WAV', 'AAC', 'M4A', 'FLAC', 'OGG', 'WMA'];
-export const imageFormats = ['JPG', 'JPEG', 'PNG', 'WEBP', 'BMP'];
-export const videoFormats = ['MP4', 'MOV', 'WEBM', 'M4V'];
+import mediaLimits from '../../config/media-limits.json' with { type: 'json' };
+
+export const audioFormats = mediaLimits.supportedFormats.audio.map((extension) => extension.toUpperCase());
+export const imageFormats = mediaLimits.supportedFormats.image.map((extension) => extension.toUpperCase());
+export const videoFormats = mediaLimits.supportedFormats.video.map((extension) => extension.toUpperCase());
 export const visualFormats = [...imageFormats, ...videoFormats];
-export const exportFormats = ['MP4', 'WebM'];
-export const audioExtensions = ['mp3', 'wav', 'aac', 'm4a', 'flac', 'ogg', 'wma'] as const;
-export const imageExtensions = ['jpg', 'jpeg', 'png', 'webp', 'bmp'] as const;
-export const videoExtensions = ['mp4', 'mov', 'webm', 'm4v'] as const;
+export const exportFormats = mediaLimits.supportedFormats.export;
+export const audioExtensions = mediaLimits.supportedFormats.audio;
+export const imageExtensions = mediaLimits.supportedFormats.image;
+export const videoExtensions = mediaLimits.supportedFormats.video;
 export const visualExtensions = [...imageExtensions, ...videoExtensions] as const;
 export const resolutionOptions = [
   '1920x1080',
@@ -83,6 +85,9 @@ export function validateMediaImport(file: MediaFileDetails, kind: MediaImportKin
     ? 'audio/'
     : imageExtensionSet.has(extension) ? 'image/' : 'video/';
   const expectedMimeHints = mimeHintsByExtension[extension];
+  if (!expectedMimeHints) {
+    return { valid: false, message: `"${name}" uses a format that is not implemented by this application.` };
+  }
   const isGenericMimeHint = ['application/octet-stream', 'application/x-octet-stream', 'binary/octet-stream'].includes(mimeType);
   if (mimeType && !isGenericMimeHint && !expectedMimeHints.includes(mimeType)) {
     return {

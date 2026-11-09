@@ -44,7 +44,7 @@ test('resolves metadata and removes listeners without tearing down a successful 
   assert.equal(audio.listeners.get('loadedmetadata').size, 0);
   assert.equal(audio.listeners.get('error').size, 0);
   assert.deepEqual(audio.removedAttributes, []);
-  assert.equal(audio.loads, 0);
+  assert.equal(audio.loads, 1);
 });
 
 test('times out, removes listeners, and tears down the failed source', async () => {
@@ -54,7 +54,7 @@ test('times out, removes listeners, and tears down the failed source', async () 
   await assert.rejects(result, /Timed out while reading audio metadata/);
   assert.equal(audio.src, '');
   assert.deepEqual(audio.removedAttributes, ['src']);
-  assert.equal(audio.loads, 1);
+  assert.equal(audio.loads, 2);
   assert.equal(audio.listeners.get('loadedmetadata').size, 0);
   assert.equal(audio.listeners.get('error').size, 0);
 });
@@ -66,7 +66,7 @@ test('decode errors tear down the source and reject with an actionable reason', 
 
   await assert.rejects(result, /could not decode this audio/i);
   assert.equal(audio.src, '');
-  assert.equal(audio.loads, 1);
+  assert.equal(audio.loads, 2);
   assert.equal(audio.listeners.get('loadedmetadata').size, 0);
   assert.equal(audio.listeners.get('error').size, 0);
 });

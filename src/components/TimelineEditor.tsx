@@ -22,8 +22,10 @@ type TimelineEditorProps = {
   selectedClipId: string;
   currentTime: number;
   soundtrackDuration: number;
+  soundtrackName: string;
+  pixelsPerSecond: number;
+  snapEnabled: boolean;
   onSeek: (time: number) => void;
-  onAddTrack: () => void;
   onTrackChange: (id: string, patch: Partial<Pick<TimelineTrack, 'name' | 'visible' | 'locked'>>) => void;
   onMoveClip: (clipId: string, trackId: string, timelinePosition: number) => void;
   onSelect: (id: string) => void;
@@ -42,16 +44,17 @@ type TimelineEditorProps = {
 const formatTime = (time: number) => `${Math.floor(time / 60)}:${(time % 60).toFixed(1).padStart(4, '0')}`;
 
 export function TimelineEditor({
-  assets, tracks, clips, titles, markers, selectedTitleId, selectedClipId, currentTime, soundtrackDuration, onSeek, onAddTrack, onTrackChange,
+  assets, tracks, clips, titles, markers, selectedTitleId, selectedClipId, currentTime, soundtrackDuration, soundtrackName,
+  pixelsPerSecond, snapEnabled, onSeek, onTrackChange,
   onMoveClip, onSelect, onChange, onTransform, onRemove, onSplit, onDuplicate, onSelectTitle, onSeekTitle,
   onAddMarker, onRenameMarker, onRemoveMarker,
 }: TimelineEditorProps) {
-  const [pixelsPerSecond, setPixelsPerSecond] = useState(48);
   const [selectedTrackId, setSelectedTrackId] = useState(tracks[0]?.id ?? '');
-  const [snapEnabled, setSnapEnabled] = useState(true);
   const [markerLabels, setMarkerLabels] = useState<Record<string, string>>({});
   const [stillDurationDraft, setStillDurationDraft] = useState('');
   const dragRef = useRef<{ clipId: string; grabOffsetPixels: number } | null>(null);
+  const timelineViewportRef = useRef<HTMLDivElement | null>(null);
+  const [timelineViewportWidth, setTimelineViewportWidth] = useState(0);
   // Show the visually highest (largest order) tracks first; renderers draw
   // low-to-high so this display order maps to top-to-bottom compositing.
   const orderedTracks = useMemo(() => [...tracks].sort((a, b) => b.order - a.order), [tracks]);
@@ -60,7 +63,8 @@ export function TimelineEditor({
   const selectedClip = clips.find((clip) => clip.id === selectedClipId);
   const selectedAsset = assets.find((asset) => asset.id === selectedClip?.assetId);
   const selectedTrack = tracks.find((track) => track.id === selectedClip?.trackId);
-  const timelineWidth = Math.max(640, timelineExtent * pixelsPerSecond);
+  const trackLabelWidth = 160;
+  const timelineWidth = Math.max(640, timelineExtent * pixelsPerSecond, timelineViewportWidth - trackLabelWidth);
   const ticks = Array.from({ length: Math.ceil(timelineExtent / 5) + 1 }, (_, index) => index * 5).filter((time) => time <= timelineExtent + 0.01);
   const seek = (time: number) => onSeek(clampTimelineTime(time, soundtrackDuration));
 
@@ -72,35 +76,34 @@ export function TimelineEditor({
     setStillDurationDraft(selectedClip ? String(selectedClip.stillDuration) : '');
   }, [selectedClip?.id, selectedClip?.stillDuration]);
 
+  useEffect(() => {
+    const viewport = timelineViewportRef.current;
+    if (!viewport) return;
+    const updateWidth = () => setTimelineViewportWidth(viewport.clientWidth);
+    updateWidth();
+    const observer = new ResizeObserver(updateWidth);
+    observer.observe(viewport);
+    return () => observer.disconnect();
+  }, []);
+
   return (
-    <section className="space-y-4 border-t border-neutral-200 pt-5">
+    <section className="min-w-0 space-y-3">
       <div className="flex flex-wrap items-center justify-between gap-3">
         <div>
-          <h3 className="text-sm font-semibold text-ink">Visual timeline</h3>
-          <p className="mt-1 text-xs text-neutral-500">Clips use absolute positions and may overlap; higher tracks render above lower tracks.</p>
+          <h3 className="text-sm font-semibold text-ink">Timeline</h3>
+          <p className="mt-1 text-xs text-neutral-500">Position clips in time; higher video tracks render above lower tracks.</p>
         </div>
-        <div className="flex items-center gap-3">
-          <span className="text-xs tabular-nums text-neutral-500">{clips.length} clips · {formatTime(duration)}</span>
-          <button type="button" onClick={onAddTrack} className="border border-neutral-300 px-3 py-2 text-xs font-semibold hover:bg-neutral-50">Add video track</button>
-        </div>
+        <span className="text-xs tabular-nums text-neutral-500">{clips.length} clips · {formatTime(duration)}</span>
       </div>
-      <p className="rounded-sm bg-amber-50 px-3 py-2 text-xs text-amber-900">One soundtrack is supported. Multiple audio clips and audio tracks are not implemented. Visual clips positioned after the soundtrack ends will not play or export in this iteration.</p>
-      <div className="flex items-center gap-3">
-        <label className="flex items-center gap-2 text-xs text-neutral-600" htmlFor="timeline-zoom">Timeline zoom</label>
-        <input id="timeline-zoom" type="range" min="24" max="120" step="4" value={pixelsPerSecond} onChange={(event) => setPixelsPerSecond(Number(event.target.value))} className="w-36 accent-moss" />
-        <span className="text-xs tabular-nums text-neutral-500">{pixelsPerSecond}px/s</span>
-        <label className="flex items-center gap-2 text-xs text-neutral-600">
-          <input
-            type="checkbox"
-            checked={snapEnabled}
-            onChange={(event) => setSnapEnabled(event.target.checked)}
-            aria-label="Snap clip drag positions to 0.1-second increments"
-          />
-          Snap clip drag positions (0.1s): <span className="font-semibold text-ink">{snapEnabled ? 'On' : 'Off'}</span>
-        </label>
-      </div>
-      <div className="overflow-x-auto border border-neutral-200 bg-white">
-        <div className="min-w-max">
+      <details className="group text-xs text-neutral-500">
+        <summary className="inline-flex cursor-pointer list-none items-center gap-1 rounded-full bg-amber-50 px-2.5 py-1 text-amber-900 marker:hidden">
+          <span aria-hidden="true">ⓘ</span>
+          <span>Audio track limitations</span>
+        </summary>
+        <p className="mt-2 max-w-3xl leading-relaxed">One soundtrack is supported. Multiple audio clips and audio tracks are not implemented. Visual clips positioned after the soundtrack ends will not play or export.</p>
+      </details>
+      <div ref={timelineViewportRef} className="overflow-x-auto overscroll-x-contain rounded-md border border-neutral-200 bg-white">
+        <div style={{ width: trackLabelWidth + timelineWidth }}>
           <div className="flex border-b border-neutral-200">
             <div className="w-40 shrink-0 border-r border-neutral-200 px-3 py-2 text-xs font-semibold text-neutral-500">TRACK / TIME</div>
             <div className="relative h-9" style={{ width: timelineWidth }}>
@@ -182,6 +185,27 @@ export function TimelineEditor({
               </div>
             </div>
           ))}
+          <div className="flex border-b border-neutral-200">
+            <div className="flex w-40 shrink-0 flex-col justify-center border-r border-neutral-200 bg-sky-50 px-3 py-2">
+              <span className="truncate text-[10px] font-semibold uppercase tracking-wide text-sky-900">Audio 1</span>
+              <span className="text-[10px] text-neutral-500">Soundtrack</span>
+            </div>
+            <div className="relative h-[52px] bg-sky-50/40" style={{ width: timelineWidth }} aria-label="Soundtrack timeline">
+              {soundtrackDuration > 0 && (
+                <button
+                  type="button"
+                  onClick={() => seek(0)}
+                  className="absolute inset-y-2 left-0 overflow-hidden rounded-sm border border-sky-200 bg-sky-100 px-2 text-left text-xs text-sky-950 hover:bg-sky-200"
+                  style={{ width: soundtrackDuration * pixelsPerSecond }}
+                  title={`${soundtrackName} · ${formatTime(soundtrackDuration)}`}
+                  aria-label={`Soundtrack ${soundtrackName}, ${formatTime(soundtrackDuration)}`}
+                >
+                  <span className="block truncate">{soundtrackName || 'Soundtrack'}</span>
+                </button>
+              )}
+              <div className="pointer-events-none absolute bottom-0 top-0 z-20 w-px bg-rose-500" style={{ left: clampTimelineTime(currentTime, soundtrackDuration) * pixelsPerSecond }} aria-hidden="true" />
+            </div>
+          </div>
           <div className="flex border-b border-neutral-200">
             <div className="flex w-40 shrink-0 flex-col justify-center border-r border-neutral-200 bg-lime/20 px-3 py-2">
               <span className="text-[10px] font-semibold uppercase tracking-wide text-moss">Titles</span>

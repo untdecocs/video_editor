@@ -4,8 +4,8 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        display: ['DM Sans', 'sans-serif'],
-        sans: ['DM Sans', 'sans-serif'],
+        display: ['ui-sans-serif', 'system-ui', 'sans-serif'],
+        sans: ['ui-sans-serif', 'system-ui', 'sans-serif'],
       },
       colors: {
         ink: '#17221e',

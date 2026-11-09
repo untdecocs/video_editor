@@ -1,3 +1,5 @@
+import { exportFormats } from '../services/media';
+
 type ExportSettingsProps = {
   format: string;
   resolution: string;
@@ -20,8 +22,7 @@ export function ExportSettings({
         <label>
           <span>Format</span>
           <select value={format} onChange={(event) => onFormatChange(event.target.value)}>
-            <option value="MP4">MP4</option>
-            <option value="WebM">WebM</option>
+            {exportFormats.map((supportedFormat) => <option key={supportedFormat} value={supportedFormat}>{supportedFormat}</option>)}
           </select>
         </label>
 

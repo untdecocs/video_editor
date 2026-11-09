@@ -78,6 +78,29 @@ test('round-trips every project metadata field and all media bytes', async () =>
   assert.equal(imported.media.assets['visual-1'].type, 'image/png');
 });
 
+test('enforces approved package limits before reading media bytes', async () => {
+  const limits = {
+    status: 'APPROVED',
+    maxIndividualMediaFileBytes: 5,
+    maxTotalProjectBytes: 8,
+    minimumExportDurationSeconds: 1,
+    maximumExportDurationSeconds: null,
+  };
+  await assert.rejects(
+    buildProjectPackage(project(), media(), webcrypto, limits),
+    /approved total project-media limit/,
+  );
+  const validPackage = await buildProjectPackage(project(), media(), webcrypto);
+  await assert.rejects(
+    parseProjectPackage(validPackage, webcrypto, limits),
+    /approved total project-media limit/,
+  );
+  await assert.rejects(
+    buildProjectPackage(project(), media(), webcrypto, { ...limits, maxIndividualMediaFileBytes: 3, maxTotalProjectBytes: 50 }),
+    /exceeds the approved audio file-size limit/,
+  );
+});
+
 test('round-trips large media and rejects malformed large base64 payloads', async () => {
   const mediaSize = 8 * 1024 * 1024;
   const audioBytes = new Uint8Array(mediaSize);

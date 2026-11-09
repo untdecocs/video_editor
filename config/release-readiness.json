@@ -1,0 +1,13 @@
+{
+  "mode": "PRIVATE",
+  "publicAuthorization": null,
+  "privateBetaAuthorization": null,
+  "privacyReview": {
+    "owner": null,
+    "reviewer": null,
+    "status": "NOT_STARTED",
+    "reviewDate": null,
+    "approvalNotes": null,
+    "policyUrls": []
+  }
+}

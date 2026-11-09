@@ -1,6 +1,7 @@
 import type { TimelineAsset, TimelineClip, TimelineTrack } from './timeline';
 import { getActiveClips, getClipDuration, getClipSourceTime, getPreviousClipOnTrack } from './timeline';
 import { getActiveTitles, mapTitleToOutput, type TitleOverlay } from './titleOverlay';
+import { waitForImageDecode } from './imageMetadata';
 
 type ExportOptions = {
   audioFile: File;
@@ -13,9 +14,130 @@ type ExportOptions = {
   frameRate: number;
   mimeType: string;
   onProgress: (progress: number) => void;
+  onStatus: (status: string) => void;
+  signal: AbortSignal;
 };
 
 type VisualElement = HTMLImageElement | HTMLVideoElement;
+
+function abortError() {
+  return new DOMException('Video export was canceled.', 'AbortError');
+}
+
+function throwIfAborted(signal: AbortSignal) {
+  if (signal.aborted) throw abortError();
+}
+
+function raceWithAbort<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
+  throwIfAborted(signal);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(abortError());
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
+}
+
+function waitForVideoData(video: HTMLVideoElement, fileName: string, signal: AbortSignal): Promise<void> {
+  const load = new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      cleanup();
+      reject(new Error(`Timed out while loading video clip: ${fileName}`));
+    }, 15_000);
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      video.removeEventListener('loadeddata', onLoadedData);
+      video.removeEventListener('error', onError);
+    };
+    const onLoadedData = () => {
+      cleanup();
+      resolve();
+    };
+    const onError = () => {
+      cleanup();
+      reject(new Error(`Could not decode video clip: ${fileName}`));
+    };
+    video.addEventListener('loadeddata', onLoadedData, { once: true });
+    video.addEventListener('error', onError, { once: true });
+    video.load();
+  });
+  return raceWithAbort(load, signal);
+}
+
+function waitForOutputMedia(
+  media: HTMLMediaElement,
+  sourceUrl: string,
+  signal: AbortSignal,
+): Promise<void> {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const eventName = media instanceof HTMLVideoElement ? 'loadeddata' : 'loadedmetadata';
+    const timeout = window.setTimeout(() => finish(new Error('Timed out while validating the exported video.')), 15_000);
+    const cleanup = () => {
+      window.clearTimeout(timeout);
+      media.removeEventListener(eventName, onReady);
+      media.removeEventListener('error', onError);
+      signal.removeEventListener('abort', onAbort);
+    };
+    const finish = (error?: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      if (error) reject(error);
+      else resolve();
+    };
+    const onReady = () => {
+      if (!Number.isFinite(media.duration) || media.duration <= 0) {
+        finish(new Error('The exported video has no valid duration.'));
+        return;
+      }
+      finish();
+    };
+    const onError = () => finish(new Error('The browser could not decode the exported video and soundtrack.'));
+    const onAbort = () => finish(abortError());
+
+    media.addEventListener(eventName, onReady, { once: true });
+    media.addEventListener('error', onError, { once: true });
+    signal.addEventListener('abort', onAbort, { once: true });
+    if (signal.aborted) {
+      onAbort();
+      return;
+    }
+    media.src = sourceUrl;
+    media.load();
+  });
+}
+
+async function validateOutput(blob: Blob, width: number, height: number, signal: AbortSignal) {
+  const url = URL.createObjectURL(blob);
+  const video = document.createElement('video');
+  const audio = new Audio();
+  video.preload = 'auto';
+  video.muted = true;
+  audio.preload = 'metadata';
+  try {
+    await waitForOutputMedia(video, url, signal);
+    await waitForOutputMedia(audio, url, signal);
+    if (video.videoWidth !== width || video.videoHeight !== height) {
+      throw new Error(`The exported video dimensions do not match the selected ${width} × ${height} canvas.`);
+    }
+  } finally {
+    [video, audio].forEach((media) => {
+      media.pause();
+      media.removeAttribute('src');
+      media.load();
+    });
+    URL.revokeObjectURL(url);
+  }
+}
 
 export function getSupportedMimeType(format: string): string | null {
   if (typeof MediaRecorder === 'undefined') return null;
@@ -130,7 +252,10 @@ export async function renderVideo({
   frameRate,
   mimeType,
   onProgress,
+  onStatus,
+  signal,
 }: ExportOptions): Promise<Blob> {
+  throwIfAborted(signal);
   if (typeof MediaRecorder === 'undefined') throw new Error('Video export is not supported in this browser.');
   if (!clips.length) throw new Error('Add at least one visual clip before exporting.');
 
@@ -143,13 +268,14 @@ export async function renderVideo({
   const visuals = new Map<string, VisualElement>();
 
   try {
+    onStatus('Preparing soundtrack…');
     audioContext = new AudioContext();
     const source = audioContext.createMediaElementSource(audio);
     const destination = audioContext.createMediaStreamDestination();
     source.connect(destination);
-    await audioContext.resume();
+    await raceWithAbort(audioContext.resume(), signal);
 
-    const audioDuration = await new Promise<number>((resolve, reject) => {
+    const audioDuration = await raceWithAbort(new Promise<number>((resolve, reject) => {
       const timeout = window.setTimeout(() => reject(new Error('Timed out while loading the soundtrack.')), 15000);
       audio.onloadedmetadata = () => {
         window.clearTimeout(timeout);
@@ -162,28 +288,30 @@ export async function renderVideo({
         reject(new Error('The selected audio could not be decoded by this browser. Try a standard MP3 or WAV file.'));
       };
       audio.src = audioUrl;
-    });
+      audio.load();
+    }), signal);
 
+    onStatus('Loading visual media…');
+    let loadedAssets = 0;
     await Promise.all(assets.map(async (asset) => {
+      throwIfAborted(signal);
       if (asset.kind === 'image') {
         const image = new Image();
-        image.src = asset.url;
-        await image.decode();
         visuals.set(asset.id, image);
+        await raceWithAbort(waitForImageDecode(image, asset.url), signal);
       } else {
         const video = document.createElement('video');
+        visuals.set(asset.id, video);
         video.src = asset.url;
         video.preload = 'auto';
         video.muted = true;
         video.playsInline = true;
-        await new Promise<void>((resolve, reject) => {
-          video.onloadeddata = () => resolve();
-          video.onerror = () => reject(new Error(`Could not decode video clip: ${asset.file.name}`));
-          video.load();
-        });
-        visuals.set(asset.id, video);
+        await waitForVideoData(video, asset.file.name, signal);
       }
+      loadedAssets += 1;
+      onStatus(`Loaded visual media · ${loadedAssets}/${assets.length}`);
     }));
+    throwIfAborted(signal);
 
     const canvas = document.createElement('canvas');
     canvas.width = width;
@@ -234,13 +362,27 @@ export async function renderVideo({
     };
 
     drawAtTime(0);
-    return await new Promise<Blob>((resolve, reject) => {
+    onStatus('Rendering video…');
+    const blob = await new Promise<Blob>((resolve, reject) => {
       let settled = false;
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
+        signal.removeEventListener('abort', onAbort);
         if (error) reject(error);
-        else resolve(new Blob(chunks, { type: mimeType }));
+        else {
+          onStatus('Finalizing video…');
+          const blob = new Blob(chunks, { type: mimeType });
+          if (!blob.size) {
+            reject(new Error('The browser produced an empty video file. Try another export format or browser.'));
+          } else {
+            resolve(blob);
+          }
+        }
+      };
+      const onAbort = () => {
+        finish(abortError());
+        if (recorder.state !== 'inactive') recorder.stop();
       };
 
       recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
@@ -248,11 +390,19 @@ export async function renderVideo({
       recorder.onstop = () => finish();
       audio.onended = () => {
         onProgress(100);
-        if (recorder.state !== 'inactive') recorder.stop();
+        if (recorder.state !== 'inactive') {
+          try { recorder.requestData(); } catch { /* stop() still flushes the final recording data */ }
+          recorder.stop();
+        }
       };
 
       try {
-        recorder.start(1000);
+        recorder.start(Math.min(1000, Math.max(50, audioDuration * 250)));
+        signal.addEventListener('abort', onAbort, { once: true });
+        if (signal.aborted) {
+          onAbort();
+          return;
+        }
         animationFrame = window.requestAnimationFrame(drawFrame);
         void audio.play().catch(() => {
           finish(new Error('The browser could not start soundtrack playback for export.'));
@@ -262,6 +412,9 @@ export async function renderVideo({
         finish(error instanceof Error ? error : new Error('The video recorder could not be started.'));
       }
     });
+    onStatus('Validating video and soundtrack…');
+    await validateOutput(blob, width, height, signal);
+    return blob;
   } finally {
     window.cancelAnimationFrame(animationFrame);
     audio.pause();

@@ -21,9 +21,12 @@ npm install
 npm run dev
 npm test
 npm run build
+npm run readiness:dashboard
 ```
 
 Timeline helper tests use Node's built-in test runner. The app uses Tailwind CSS for styling.
+
+`npm run build` creates a preview-mode artifact. Public builds are intentionally separate and blocked until the production, release, privacy, and media-readiness records are approved. See [PRODUCTION_READINESS.md](./PRODUCTION_READINESS.md), [PRIVACY_REVIEW.md](./PRIVACY_REVIEW.md), [MEDIA_LIMITS.md](./MEDIA_LIMITS.md), and [RELEASE_APPROVAL.md](./RELEASE_APPROVAL.md).
 
 ## Browser export support
 

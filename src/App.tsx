@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { AudioUploader } from './components/AudioUploader';
 import { CompositionPreview } from './components/CompositionPreview';
 import { ExportProgress } from './components/ExportProgress';
+import { approvedProductionLinks } from './config/production';
 import { TimelineEditor } from './components/TimelineEditor';
 import { TitleOverlayEditor } from './components/TitleOverlayEditor';
 import {
@@ -22,6 +23,9 @@ import {
 import { MediaUrlRegistry } from './services/mediaUrlRegistry';
 import { waitForVideoMetadata } from './services/videoMetadata';
 import { waitForAudioMetadata } from './services/audioMetadata';
+import { waitForImageDecode } from './services/imageMetadata';
+import { APPROVED_MEDIA_LIMITS, getProjectMediaBytes, validateApprovedExportDuration, validateApprovedMediaFile } from './services/mediaLimits';
+import { PORTABLE_PACKAGE_SAFETY_LIMITS } from './services/mediaSafetyLimits.js';
 import { createHistory, type History } from './services/history';
 import { getSupportedMimeType, renderVideo } from './services/videoExport';
 import { createDefaultTitle, type TitleOverlay } from './services/titleOverlay';
@@ -89,6 +93,22 @@ function getMediaTypeLabel(file: File): string {
     : 'Unknown type';
 }
 
+function getProjectStatusLabel(status: string): string {
+  const normalized = status.toLowerCase();
+  if (normalized.includes('checking')) return 'Checking…';
+  if (/saving|preparing|validating|importing|exporting/.test(normalized)) return 'Working…';
+  if (/could not|failed|error|unavailable|corrupt|malform|timed out|quota|blocked|needs attention/.test(normalized)) {
+    return 'Needs attention';
+  }
+  if (normalized.includes('cancelled')) return 'Unchanged';
+  if (normalized.includes('new project')) return 'New project';
+  if (normalized.includes('storage is ready')) return 'Ready';
+  if (/saved|recovered|opened|deleted|imported|exported/.test(normalized)) {
+    return 'All changes saved';
+  }
+  return 'Unsaved changes';
+}
+
 function App() {
   const [step, setStep] = useState(1);
   const [projectId, setProjectId] = useState<string>(() => newId());
@@ -119,6 +139,9 @@ function App() {
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
+  const [timelinePixelsPerSecond, setTimelinePixelsPerSecond] = useState(48);
+  const [snapTimelineEnabled, setSnapTimelineEnabled] = useState(true);
+  const [previewVolume, setPreviewVolume] = useState(1);
   const [statusMessage, setStatusMessage] = useState('');
   const [assetSearch, setAssetSearch] = useState('');
   const [isImportingVisuals, setIsImportingVisuals] = useState(false);
@@ -128,9 +151,11 @@ function App() {
   const [exportComplete, setExportComplete] = useState(false);
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const mainRef = useRef<HTMLElement | null>(null);
+  const previewContainerRef = useRef<HTMLDivElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const projectMenuButtonRef = useRef<HTMLButtonElement | null>(null);
   const exportButtonRef = useRef<HTMLButtonElement | null>(null);
+  const exportAbortControllerRef = useRef<AbortController | null>(null);
   const wasExportingRef = useRef(false);
   const visualImportRef = useRef(false);
   const urlsRef = useRef(new MediaUrlRegistry());
@@ -252,12 +277,13 @@ function App() {
   useEffect(() => {
     const audio = audioRef.current;
     if (!audio || !audioUrl) return;
+    audio.volume = previewVolume;
     if (isPlaying) void audio.play().catch(() => {
       setIsPlaying(false);
       setStatusMessage('Playback was blocked by the browser. Press play to try again.');
     });
     else audio.pause();
-  }, [audioUrl, isPlaying]);
+  }, [audioUrl, isPlaying, previewVolume]);
   const revokeUrl = (url: string) => {
     urlsRef.current.revoke(url);
   };
@@ -326,22 +352,20 @@ function App() {
         createdUrls.push(url);
         if (!mediaAlreadyDecoded && asset.kind === 'image') {
           const image = new Image();
-          image.src = url;
           try {
-            await image.decode();
+            await waitForImageDecode(image, url);
           } catch {
             throw new Error(`Could not read "${asset.fileName}". Re-import the original media file.`);
           }
         } else if (!mediaAlreadyDecoded) {
           const video = document.createElement('video');
           video.preload = 'metadata';
-          await new Promise<void>((resolve, reject) => {
-            video.onloadedmetadata = () => Number.isFinite(video.duration) && video.duration > 0
-              ? resolve()
-              : reject(new Error(`Could not read "${asset.fileName}". Re-import the original media file.`));
-            video.onerror = () => reject(new Error(`Could not read "${asset.fileName}". Re-import the original media file.`));
-            video.src = url;
-          });
+          try {
+            await waitForVideoMetadata(video, url);
+          } catch (error) {
+            const reason = error instanceof Error ? ` ${error.message}` : '';
+            throw new Error(`Could not read "${asset.fileName}".${reason} Re-import the original media file.`);
+          }
         }
         return { id: asset.id, file, url, kind: asset.kind, duration: asset.duration };
       }));
@@ -417,7 +441,6 @@ function App() {
         const recoverable = projects.find((project) => !project.problem);
         setProjectList(projects);
         setProjectToOpen(recoverable?.id ?? projects[0]?.id ?? '');
-        setIsProjectStorageReady(true);
         if (recoverable) {
           const stored = await projectStorage.loadProject(recoverable.id);
           await applyStoredProject(stored);
@@ -429,6 +452,7 @@ function App() {
         } else {
           setProjectStorageStatus('Local project storage is ready. Edits will autosave in this browser.');
         }
+        setIsProjectStorageReady(true);
       } catch (error) {
         setIsProjectStorageReady(true);
         setProjectStorageStatus(error instanceof Error ? error.message : 'Local project recovery failed. Your current project is still open.');
@@ -472,6 +496,15 @@ function App() {
     const validation = validateMediaImport(file, 'audio');
     if (!validation.valid) {
       setStatusMessage(validation.message);
+      return;
+    }
+    const mediaLimitError = validateApprovedMediaFile(
+      file,
+      getProjectMediaBytes(null, assets),
+      'audio',
+    );
+    if (mediaLimitError) {
+      setStatusMessage(mediaLimitError);
       return;
     }
     let duration: number;
@@ -530,10 +563,18 @@ function App() {
     setIsImportingVisuals(true);
     const rejected: string[] = [];
     try {
+      let projectMediaBytes = getProjectMediaBytes(audioFile, assets);
       const eligibleFiles = files.filter((file) => {
         const validation = validateMediaImport(file, 'visual');
         if (!validation.valid) rejected.push(validation.message);
-        return validation.valid;
+        if (!validation.valid) return false;
+        const mediaLimitError = validateApprovedMediaFile(file, projectMediaBytes, 'visual');
+        if (mediaLimitError) {
+          rejected.push(mediaLimitError);
+          return false;
+        }
+        projectMediaBytes += file.size;
+        return true;
       });
       const newAssets = await Promise.all(eligibleFiles.map(async (file): Promise<TimelineAsset | null> => {
         const validation = validateMediaImport(file, 'visual');
@@ -548,8 +589,7 @@ function App() {
           })();
           if (kind === 'image') {
             const image = new Image();
-            image.src = url;
-            await image.decode();
+            await waitForImageDecode(image, url);
           }
           return { id: newId(), file, url, kind, duration };
         } catch (error) {
@@ -849,7 +889,7 @@ function App() {
 
   useEffect(() => {
     if (!isProjectMenuOpen) return;
-    const handleDocumentPointerDown = (event: MouseEvent) => {
+    const handleDocumentPointerDown = (event: PointerEvent) => {
       const target = event.target as Node | null;
       if (!target) return;
       const clickedInsideMenu = projectMenuRef.current?.contains(target);
@@ -858,8 +898,18 @@ function App() {
         setIsProjectMenuOpen(false);
       }
     };
-    document.addEventListener('mousedown', handleDocumentPointerDown);
-    return () => document.removeEventListener('mousedown', handleDocumentPointerDown);
+    const handleDocumentKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      setIsProjectMenuOpen(false);
+      projectMenuButtonRef.current?.focus();
+    };
+    document.addEventListener('pointerdown', handleDocumentPointerDown);
+    document.addEventListener('keydown', handleDocumentKeyDown);
+    return () => {
+      document.removeEventListener('pointerdown', handleDocumentPointerDown);
+      document.removeEventListener('keydown', handleDocumentKeyDown);
+    };
   }, [isProjectMenuOpen]);
 
   const resetProjectState = () => {
@@ -990,9 +1040,8 @@ function App() {
         temporaryUrls.push(url);
         if (asset.kind === 'image') {
           const image = new Image();
-          image.src = url;
           try {
-            await image.decode();
+            await waitForImageDecode(image, url);
           } catch {
             throw new Error(`Could not decode "${asset.fileName}". Choose a readable original media file.`);
           }
@@ -1026,7 +1075,7 @@ function App() {
     let downloadUrl: string | null = null;
     let link: HTMLAnchorElement | null = null;
     try {
-      const json = await buildProjectPackage(makeProjectDocument(), makeProjectMedia());
+      const json = await buildProjectPackage(makeProjectDocument(), makeProjectMedia(), globalThis.crypto, APPROVED_MEDIA_LIMITS);
       downloadUrl = URL.createObjectURL(new Blob([json], { type: 'application/json;charset=utf-8' }));
       link = document.createElement('a');
       link.href = downloadUrl;
@@ -1047,10 +1096,10 @@ function App() {
     setIsProjectPackageBusy(true);
     setProjectStorageStatus('Validating project package and media integrity…');
     try {
-      if (file.size > 800 * 1024 * 1024) {
+      if (file.size > PORTABLE_PACKAGE_SAFETY_LIMITS.maxProjectPackageFileBytes) {
         throw new Error('Project package exceeds this build’s import safety guard. Your current project is unchanged; try a smaller package.');
       }
-      const imported = await parseProjectPackage(await file.text());
+      const imported = await parseProjectPackage(await file.text(), globalThis.crypto, APPROVED_MEDIA_LIMITS);
       setProjectStorageStatus('Checking that imported media can be decoded…');
       await verifyPackageMediaDecodes(imported);
       const hasActiveWork = Boolean(
@@ -1103,6 +1152,11 @@ function App() {
       setStatusMessage('Add a soundtrack and at least one visual clip before exporting.');
       return;
     }
+    const durationLimitError = validateApprovedExportDuration(audioDuration);
+    if (durationLimitError) {
+      setStatusMessage(durationLimitError);
+      return;
+    }
     const mimeType = getSupportedMimeType(format);
     if (!mimeType) {
       setStatusMessage(`${format} recording is not supported in this browser. Choose another format or use a supported browser.`);
@@ -1112,6 +1166,8 @@ function App() {
     setIsExporting(true);
     setExportComplete(false);
     setExportProgress(0);
+    const abortController = new AbortController();
+    exportAbortControllerRef.current = abortController;
     setStatusMessage('Preparing your video…');
     try {
       const blob = await renderVideo({
@@ -1124,6 +1180,8 @@ function App() {
         height,
         frameRate,
         mimeType,
+        signal: abortController.signal,
+        onStatus: setStatusMessage,
         onProgress: (progress) => {
           setExportProgress(progress);
           setStatusMessage(`Creating your video · ${Math.round(progress)}%`);
@@ -1139,8 +1197,12 @@ function App() {
       setExportComplete(true);
       setStatusMessage('Export complete. Your video is downloading.');
     } catch (error) {
-      setStatusMessage(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
+      setExportComplete(false);
+      setStatusMessage(abortController.signal.aborted
+        ? 'Export canceled. Your project is unchanged.'
+        : `Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     } finally {
+      if (exportAbortControllerRef.current === abortController) exportAbortControllerRef.current = null;
       setIsExporting(false);
     }
   };
@@ -1154,8 +1216,18 @@ function App() {
     }
     setIsPlaying((playing) => !playing);
   };
+  const togglePreviewFullscreen = async () => {
+    try {
+      if (document.fullscreenElement) await document.exitFullscreen();
+      else await previewContainerRef.current?.requestFullscreen();
+    } catch (error) {
+      setStatusMessage(error instanceof Error
+        ? `Could not change preview fullscreen mode: ${error.message}`
+        : 'Could not change preview fullscreen mode.');
+    }
+  };
 
-  const projectStatusLabel = projectStorageStatus.toLowerCase().includes('saving') || projectStorageStatus.toLowerCase().includes('could not') || projectStorageStatus.toLowerCase().includes('needs attention') ? 'Unsaved changes' : 'All changes saved';
+  const projectStatusLabel = getProjectStatusLabel(projectStorageStatus);
 
   const menuGroups = [
     {
@@ -1245,10 +1317,15 @@ function App() {
   return (
     <div className="min-h-screen bg-paper text-ink">
       <header className="mx-auto flex max-w-[1500px] items-center justify-between border-b border-neutral-200 px-5 py-4 md:px-10">
-        <a className="flex items-center gap-3 text-sm font-bold tracking-wide text-ink no-underline" href="#" aria-label="Stillwave home">
+        {approvedProductionLinks
+          ? <a className="flex items-center gap-3 text-sm font-bold tracking-wide text-ink no-underline" href={approvedProductionLinks.home} aria-label="Stillwave home">
+            <span className="grid h-8 w-8 place-items-center bg-moss text-lime" aria-hidden="true">S</span> STILLWAVE
+          </a>
+          : <span className="flex items-center gap-3 text-sm font-bold tracking-wide text-ink" aria-label="Stillwave">
           <span className="grid h-8 w-8 place-items-center bg-moss text-lime" aria-hidden="true">S</span> STILLWAVE
-        </a>
+          </span>}
         <span className="text-xs text-neutral-500">SOCIAL VIDEO STUDIO</span>
+        {approvedProductionLinks && <a className="bg-moss px-3 py-2 text-xs font-semibold text-white no-underline" href={approvedProductionLinks.cta.destination}>{approvedProductionLinks.cta.label}</a>}
       </header>
       <section aria-label="Project management" className="mx-auto border-b border-neutral-200 bg-white/60 px-5 py-4 md:px-10">
         <div className="mx-auto flex max-w-[1500px] flex-col gap-4 lg:flex-row lg:items-end lg:justify-between">
@@ -1290,6 +1367,8 @@ function App() {
                 ref={projectMenuButtonRef}
                 type="button"
                 aria-label="Open project menu"
+                aria-haspopup="true"
+                aria-controls="project-actions-menu"
                 aria-expanded={isProjectMenuOpen}
                 onClick={() => setIsProjectMenuOpen((open) => !open)}
                 className="grid h-10 w-10 place-items-center rounded-md border border-neutral-200 bg-white text-neutral-700 shadow-sm transition hover:border-neutral-300 hover:text-ink"
@@ -1301,7 +1380,7 @@ function App() {
                 </svg>
               </button>
               {isProjectMenuOpen && (
-                <div ref={projectMenuRef} className="absolute right-0 top-full z-30 mt-2 w-64 overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-xl">
+                <div id="project-actions-menu" ref={projectMenuRef} className="project-menu-enter absolute right-0 top-full z-30 mt-2 w-64 overflow-hidden rounded-xl border border-neutral-200 bg-white shadow-xl">
                   {menuGroups.map((group, index) => (
                     <div key={group.label}>
                       <div className="px-3 pb-1 pt-3 text-[10px] font-semibold uppercase tracking-[0.14em] text-neutral-400">{group.label}</div>
@@ -1403,72 +1482,137 @@ function App() {
           <div className="mt-8 flex justify-between"><button type="button" onClick={() => setStep(1)} disabled={isImportingVisuals} className="px-1 py-3 text-sm text-neutral-600 disabled:opacity-40">← Back</button><button type="button" onClick={() => setStep(3)} disabled={!canContinue || isImportingVisuals} className="bg-moss px-5 py-3 text-sm font-semibold text-white disabled:opacity-40">Continue to editor <span aria-hidden="true">→</span></button></div>
         </section>}
 
-        {step === 3 && <section className="space-y-7 border-t border-neutral-200 pt-6">
-          <div className="flex flex-wrap items-center justify-between gap-4">
-            <div><h2 className="text-xl font-semibold">Preview and edit</h2><p className="mt-1 text-sm text-neutral-500">{audioFile?.name} · {formatDuration(audioDuration)} soundtrack</p></div>
+        {step === 3 && <section className="space-y-6 border-t border-neutral-200 pt-6">
+          <div className="flex flex-wrap items-center justify-between gap-3">
+            <div><h2 className="text-xl font-semibold">Edit &amp; export</h2><p className="mt-1 text-sm text-neutral-500">{audioFile?.name} · {formatDuration(audioDuration)} soundtrack</p></div>
             <div className="flex items-center gap-2 text-xs text-neutral-500"><span className="h-2 w-2 rounded-full bg-lime-500" />{projectStorageStatus.startsWith('Saved') ? 'Autosaved locally' : 'Local autosave enabled'}</div>
           </div>
-          <div className="grid items-start gap-8 xl:grid-cols-[minmax(0,1.5fr)_minmax(390px,0.9fr)]">
-            <div className="space-y-4">
-              <CompositionPreview assets={assets} tracks={tracks} clips={clips} titles={titles} currentTime={currentTime} isPlaying={isPlaying} seekRevision={previewSeekRevision} width={width} height={height} />
-              <div className="flex items-center gap-4 border-b border-neutral-200 pb-4">
-                <button type="button" onClick={playPause} className="grid h-10 w-10 shrink-0 place-items-center bg-ink text-white" aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>{isPlaying ? 'Ⅱ' : '▶'}</button>
-                <div className="min-w-0 flex-1"><input aria-label="Preview position" type="range" min="0" max={Math.max(audioDuration, 0.1)} step="0.1" value={clampTimelineTime(currentTime, audioDuration)} onChange={(event) => { const time = clampTimelineTime(Number(event.target.value), audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(time); if (audioRef.current) audioRef.current.currentTime = time; }} className="w-full accent-moss" /><div className="flex justify-between text-[11px] tabular-nums text-neutral-500"><span>{formatDuration(clampTimelineTime(currentTime, audioDuration))}</span><span>{formatDuration(audioDuration)}</span></div></div>
+          <div className="grid min-w-0 grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,3fr)_minmax(300px,2fr)]">
+            <div ref={previewContainerRef} className="preview-workspace min-w-0">
+              <div className="flex min-h-[260px] items-center justify-center rounded-lg border border-neutral-800 bg-[#101613] p-3 sm:min-h-[340px] sm:p-5 xl:min-h-[420px]">
+                <CompositionPreview
+                  assets={assets}
+                  tracks={tracks}
+                  clips={clips}
+                  titles={titles}
+                  currentTime={currentTime}
+                  isPlaying={isPlaying}
+                  seekRevision={previewSeekRevision}
+                  width={width}
+                  height={height}
+                  className="preview-frame"
+                  style={{ width: `min(100%, ${(58 * width) / height}vh)`, aspectRatio: `${width} / ${height}` }}
+                />
+              </div>
+              <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-neutral-200 bg-white px-3 py-2.5">
+                <button type="button" onClick={playPause} className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ink text-sm text-white transition hover:bg-moss" aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>{isPlaying ? 'Ⅱ' : '▶'}</button>
+                <div className="min-w-[140px] flex-1">
+                  <input aria-label="Preview playback position" type="range" min="0" max={Math.max(audioDuration, 0.1)} step="0.1" value={clampTimelineTime(currentTime, audioDuration)} onChange={(event) => { const time = clampTimelineTime(Number(event.target.value), audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(time); if (audioRef.current) audioRef.current.currentTime = time; }} className="w-full accent-moss" />
+                  <div className="flex justify-between text-[10px] tabular-nums text-neutral-500"><span>{formatDuration(clampTimelineTime(currentTime, audioDuration))}</span><span>{formatDuration(audioDuration)}</span></div>
+                </div>
+                <label className="flex items-center gap-2 text-xs text-neutral-500" aria-label="Preview volume">
+                  <span aria-hidden="true">◖</span>
+                  <input aria-label="Preview volume" type="range" min="0" max="1" step="0.05" value={previewVolume} onChange={(event) => setPreviewVolume(Number(event.target.value))} className="w-20 accent-moss" />
+                </label>
+                <button type="button" onClick={() => void togglePreviewFullscreen()} className="grid h-9 w-9 place-items-center rounded-md text-neutral-500 transition hover:bg-neutral-100 hover:text-ink" aria-label="Toggle preview fullscreen" title="Toggle fullscreen">⛶</button>
               </div>
             </div>
-            <aside className="space-y-5">
-              <div className="grid gap-3 sm:grid-cols-2 xl:grid-cols-1">
-                <label className="text-xs font-semibold text-neutral-600">Platform and placement
-                  <select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={presetId} onChange={(event) => updateOutputSettings({ presetId: event.target.value })}>
-                    {platformPresets.map((item) => <option key={item.id} value={item.id}>{item.platform} · {item.placement} ({item.width} × {item.height})</option>)}
-                  </select>
-                </label>
-                {presetId === 'custom' && <div className="grid grid-cols-2 gap-3">
-                  <label className="text-xs font-semibold text-neutral-600">Width<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customWidth} onChange={(event) => updateOutputSettings({ customWidth: Math.max(144, Number(event.target.value)) })} /></label>
-                  <label className="text-xs font-semibold text-neutral-600">Height<input className="mt-2 w-full border border-neutral-200 px-3 py-3 text-sm font-normal" type="number" min="144" max="3840" step="2" value={customHeight} onChange={(event) => updateOutputSettings({ customHeight: Math.max(144, Number(event.target.value)) })} /></label>
-                </div>}
+            <aside className="min-w-0 overflow-hidden rounded-lg border border-neutral-200 bg-white">
+              <div className="border-b border-neutral-200 px-4 py-3">
+                <h3 className="text-sm font-semibold">Inspector</h3>
+                <p className="mt-1 truncate text-xs text-neutral-500">{platformPresets.find((item) => item.id === presetId)?.platform ?? 'Custom'} · {width} × {height}</p>
               </div>
-              <div className="grid grid-cols-2 gap-3">
-                <label className="text-xs font-semibold text-neutral-600">File format<select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={format} onChange={(event) => updateOutputSettings({ format: event.target.value })}><option>MP4</option><option>WebM</option></select></label>
-                <label className="text-xs font-semibold text-neutral-600">Frame rate<select className="mt-2 w-full border border-neutral-200 bg-white px-3 py-3 text-sm font-normal text-ink" value={frameRate} onChange={(event) => updateOutputSettings({ frameRate: Number(event.target.value) })}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
+              <div className="divide-y divide-neutral-200 px-4">
+                <details open className="inspector-section py-3">
+                  <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">Platform &amp; placement</summary>
+                  <label className="mt-2 block text-[11px] font-medium text-neutral-500">Aspect ratio and resolution
+                    <select className="mt-1.5 w-full rounded-md border border-neutral-200 bg-white px-2.5 py-2 text-xs text-ink" value={presetId} onChange={(event) => updateOutputSettings({ presetId: event.target.value })}>
+                      {platformPresets.map((item) => <option key={item.id} value={item.id}>{item.platform} · {item.placement} ({item.width} × {item.height})</option>)}
+                    </select>
+                  </label>
+                  {presetId === 'custom' && <div className="mt-2 grid grid-cols-2 gap-2">
+                    <label className="text-[11px] font-medium text-neutral-500">Width<input className="mt-1 w-full rounded-md border border-neutral-200 px-2.5 py-2 text-xs font-normal text-ink" type="number" min="144" max="3840" step="2" value={customWidth} onChange={(event) => updateOutputSettings({ customWidth: Math.max(144, Number(event.target.value)) })} /></label>
+                    <label className="text-[11px] font-medium text-neutral-500">Height<input className="mt-1 w-full rounded-md border border-neutral-200 px-2.5 py-2 text-xs font-normal text-ink" type="number" min="144" max="3840" step="2" value={customHeight} onChange={(event) => updateOutputSettings({ customHeight: Math.max(144, Number(event.target.value)) })} /></label>
+                  </div>}
+                </details>
+                <details open className="inspector-section py-3">
+                  <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">Export settings</summary>
+                  <div className="mt-2 grid grid-cols-2 gap-2">
+                    <label className="text-[11px] font-medium text-neutral-500">File format<select className="mt-1.5 w-full rounded-md border border-neutral-200 bg-white px-2.5 py-2 text-xs font-normal text-ink" value={format} onChange={(event) => updateOutputSettings({ format: event.target.value })}><option>MP4</option><option>WebM</option></select></label>
+                    <label className="text-[11px] font-medium text-neutral-500">Frame rate<select className="mt-1.5 w-full rounded-md border border-neutral-200 bg-white px-2.5 py-2 text-xs font-normal text-ink" value={frameRate} onChange={(event) => updateOutputSettings({ frameRate: Number(event.target.value) })}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
+                  </div>
+                </details>
+                <details open className="inspector-section py-3">
+                  <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">
+                    <span>Canvas &amp; sequence</span>
+                    <span className="ml-auto mr-2 text-[10px] font-normal tabular-nums text-neutral-400">{width} × {height} · {formatDuration(Math.min(audioDuration, timelineDuration))}</span>
+                  </summary>
+                  <dl className="mt-2 space-y-2 text-xs">
+                    <div className="flex justify-between gap-3"><dt className="text-neutral-500">Canvas dimensions</dt><dd className="font-medium tabular-nums text-ink">{width} × {height}</dd></div>
+                    <div className="flex justify-between gap-3"><dt className="text-neutral-500">Sequence / soundtrack</dt><dd className="font-medium tabular-nums text-ink">{formatDuration(Math.min(audioDuration, timelineDuration))} / {formatDuration(audioDuration)}</dd></div>
+                  </dl>
+                  <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">Platform dimensions are starting presets. Check current platform requirements before publishing.</p>
+                </details>
+                <details className="inspector-section py-3">
+                  <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">
+                    <span>Timeline tools</span>
+                    <span className="ml-auto mr-2 text-[10px] font-normal text-neutral-400">{timelinePixelsPerSecond}px/s · Snap {snapTimelineEnabled ? 'on' : 'off'} · {tracks.length} track{tracks.length === 1 ? '' : 's'}</span>
+                  </summary>
+                  <div className="mt-2 space-y-3">
+                    <label className="block text-[11px] font-medium text-neutral-500" htmlFor="timeline-zoom">Timeline zoom <span className="ml-1 tabular-nums text-neutral-400">{timelinePixelsPerSecond}px/s</span></label>
+                    <input id="timeline-zoom" type="range" min="24" max="120" step="4" value={timelinePixelsPerSecond} onChange={(event) => setTimelinePixelsPerSecond(Number(event.target.value))} className="w-full accent-moss" />
+                    <label className="flex items-center justify-between gap-2 text-[11px] text-neutral-600">
+                      <span>Snap clip positions to 0.1s</span>
+                      <input type="checkbox" checked={snapTimelineEnabled} onChange={(event) => setSnapTimelineEnabled(event.target.checked)} aria-label="Snap clip drag positions to 0.1-second increments" />
+                    </label>
+                    <div className="flex items-center justify-between gap-2 border-t border-neutral-100 pt-2">
+                      <span className="text-[11px] text-neutral-500">{tracks.length} video track{tracks.length === 1 ? '' : 's'}</span>
+                      <button type="button" onClick={addTrack} className="rounded-md border border-neutral-200 px-2.5 py-1.5 text-[11px] font-semibold text-neutral-700 transition hover:bg-neutral-50">+ Video track</button>
+                    </div>
+                  </div>
+                </details>
+                <details className="inspector-section py-3">
+                  <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">Title properties</summary>
+                  <div className="mt-3">
+                    <TitleOverlayEditor titles={titles} selectedTitleId={selectedTitleId} onAdd={addTitle} onSelect={setSelectedTitleId} onChange={updateTitle} onRemove={removeTitle} />
+                  </div>
+                </details>
+                <details className="inspector-section py-3">
+                  <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">Media library <span className="ml-1 font-normal text-neutral-400">{libraryItems.length}</span></summary>
+                  <div className="mt-3">{mediaLibrary}</div>
+                </details>
               </div>
-              <div className="border-t border-neutral-200 pt-4"><div className="flex justify-between text-xs text-neutral-500"><span>Canvas</span><span className="font-medium text-ink">{width} × {height}</span></div><div className="mt-2 flex justify-between text-xs text-neutral-500"><span>Sequence</span><span className="font-medium text-ink">{formatDuration(Math.min(audioDuration, timelineDuration))} of {formatDuration(audioDuration)}</span></div><p className="mt-3 text-[11px] leading-relaxed text-neutral-500">Platform dimensions are starting presets. Check current platform requirements before publishing.</p></div>
-              <TimelineEditor
-                assets={assets}
-                tracks={tracks}
-                clips={clips}
-                titles={titles}
-                markers={markers}
-                selectedTitleId={selectedTitleId}
-                selectedClipId={selectedClipId}
-                currentTime={currentTime}
-                soundtrackDuration={audioDuration}
-                onSeek={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
-                onAddTrack={addTrack}
-                onTrackChange={updateTrack}
-                onMoveClip={moveClipToTrack}
-                onSelect={setSelectedClipId}
-                onChange={updateClip}
-                onTransform={updateTransform}
-                onRemove={removeClip}
-                onSplit={handleSplit}
-                onDuplicate={duplicateClip}
-                onSelectTitle={setSelectedTitleId}
-                onSeekTitle={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
-                onAddMarker={addMarker}
-                onRenameMarker={renameMarker}
-                onRemoveMarker={removeMarker}
-              />
-              <TitleOverlayEditor
-                titles={titles}
-                selectedTitleId={selectedTitleId}
-                onAdd={addTitle}
-                onSelect={setSelectedTitleId}
-                onChange={updateTitle}
-                onRemove={removeTitle}
-              />
-              {mediaLibrary}
             </aside>
+          </div>
+          <div className="rounded-lg border border-neutral-200 bg-white p-3 sm:p-4">
+            <TimelineEditor
+              assets={assets}
+              tracks={tracks}
+              clips={clips}
+              titles={titles}
+              markers={markers}
+              selectedTitleId={selectedTitleId}
+              selectedClipId={selectedClipId}
+              currentTime={currentTime}
+              soundtrackDuration={audioDuration}
+              soundtrackName={audioFile?.name ?? ''}
+              pixelsPerSecond={timelinePixelsPerSecond}
+              snapEnabled={snapTimelineEnabled}
+              onSeek={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
+              onTrackChange={updateTrack}
+              onMoveClip={moveClipToTrack}
+              onSelect={setSelectedClipId}
+              onChange={updateClip}
+              onTransform={updateTransform}
+              onRemove={removeClip}
+              onSplit={handleSplit}
+              onDuplicate={duplicateClip}
+              onSelectTitle={setSelectedTitleId}
+              onSeekTitle={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
+              onAddMarker={addMarker}
+              onRenameMarker={renameMarker}
+              onRemoveMarker={removeMarker}
+            />
           </div>
           <div className="flex flex-wrap items-center justify-between gap-4 border-t border-neutral-200 pt-5">
             <button type="button" onClick={() => setStep(2)} className="px-1 py-3 text-sm text-neutral-600">← Back to visuals</button>
@@ -1484,7 +1628,15 @@ function App() {
         </section>}
         <audio className="sr-only" ref={audioRef} src={audioUrl ?? undefined} onTimeUpdate={(event) => setCurrentTime(clampTimelineTime(event.currentTarget.currentTime, audioDuration))} onEnded={() => { setCurrentTime(audioDuration); setIsPlaying(false); }} />
       </main>
-      {isExporting && <ExportProgress progress={exportProgress} isExporting statusMessage={statusMessage} />}
+      {isExporting && <ExportProgress
+        progress={exportProgress}
+        isExporting
+        statusMessage={statusMessage}
+        onCancel={() => {
+          setStatusMessage('Canceling export…');
+          exportAbortControllerRef.current?.abort();
+        }}
+      />}
     </div>
   );
 }

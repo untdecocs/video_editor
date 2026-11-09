@@ -4,6 +4,12 @@
 **Scope:** Phase 0 review of the current application and the product direction in `PROJECT_SPEC.md`, updated with approved DATA-01 work.
 **Status (2026-11-02):** DATA-01 project schema, DATA-02 IndexedDB lifecycle, and HIST-01 edit history are integrated. The app remains a React/Vite client-only editor. Browser-specific storage and export claims remain limited to tested evidence.
 
+## Production-readiness architecture update — 2026-11-09
+
+The application remains a React/Vite client-only editor. Production release metadata is kept in `config/production.json`; private release/privacy approvals and product media decisions are separate from the browser bundle in `config/release-readiness.json` and `config/media-limits.json`. Vite production and private-beta build modes evaluate the readiness records and require protected environment approver allowlists. The default `npm run build` creates an explicitly preview-mode artifact. A local read-only report can be generated with `npm run readiness:dashboard`; it is written outside `dist` and has no approval controls. There is still no hosting provider or deployment workflow in the repository; future deployment automation must use the gated build and enforce host-level access controls for private beta.
+
+Project media remains in browser IndexedDB, subject to quota/eviction and user data clearing. The previous external Google Fonts request has been removed; the app now uses system fonts. The current media extension allowlists and export-format options are centralized in `config/media-limits.json`, but remain marked pending product approval and browser-matrix validation.
+
 ## Executive assessment
 
 The repository is a small, client-side **React + TypeScript + Vite** video composition application. It imports local files, keeps the working edit state in React memory, previews a sequential clip list, and renders an export in the browser using Canvas, Web Audio, and `MediaRecorder`. There is no application server, API, database, authentication, or durable project storage in the inspected repository.

@@ -1,12 +1,21 @@
 import { validateMediaImport } from './media.ts';
+import { validateMediaAgainstApprovedLimits } from './mediaLimitValidation.js';
+import { PORTABLE_PACKAGE_SAFETY_LIMITS } from './mediaSafetyLimits.js';
 import { validateProjectDocument, type ProjectDocument } from './project.ts';
 import type { ProjectMediaBlobs, StoredProject } from './projectStorage.ts';
 
 export const PROJECT_PACKAGE_VERSION = 1;
 export const PROJECT_PACKAGE_EXTENSION = '.stillwave.json';
 const PACKAGE_FORMAT = 'stillwave-project';
-const MAX_MEDIA_BYTES = 256 * 1024 * 1024;
-const MAX_TOTAL_MEDIA_BYTES = 512 * 1024 * 1024;
+const { maxIndividualMediaBytes: MAX_MEDIA_BYTES, maxTotalProjectMediaBytes: MAX_TOTAL_MEDIA_BYTES } = PORTABLE_PACKAGE_SAFETY_LIMITS;
+
+type ApprovedLimits = {
+  status: string;
+  maxIndividualMediaFileBytes: number | null;
+  maxTotalProjectBytes: number | null;
+  minimumExportDurationSeconds: number | null;
+  maximumExportDurationSeconds: number | null;
+};
 
 type PackageRecord = {
   assetId: string;
@@ -146,10 +155,16 @@ async function packageRecord(
   mimeType: string,
   blob: Blob,
   subtle: SubtleCrypto,
+  currentProjectMediaBytes: number,
+  approvedLimits?: ApprovedLimits,
 ): Promise<PackageRecord> {
   if (blob.size > MAX_MEDIA_BYTES) {
     throw new ProjectPackageError(`Media "${fileName}" exceeds this build's portable-package safety guard. Your open project is unchanged; try a smaller media copy and keep the original file.`);
   }
+  const limitError = approvedLimits
+    ? validateMediaAgainstApprovedLimits({ name: fileName, size: blob.size }, currentProjectMediaBytes, kind === 'audio' ? 'audio' : 'visual', approvedLimits)
+    : null;
+  if (limitError) throw new ProjectPackageError(limitError);
   validateFileName(fileName, fileName);
   validateSupportedMedia(fileName, mimeType, kind);
   const bytes = new Uint8Array(await blob.arrayBuffer());
@@ -161,6 +176,7 @@ export async function buildProjectPackage(
   documentValue: ProjectDocument,
   media: ProjectMediaBlobs,
   cryptoProvider: Crypto | undefined = globalThis.crypto,
+  approvedLimits?: ApprovedLimits,
 ): Promise<string> {
   const document = validateProjectDocument(documentValue);
   const subtle = cryptoSubtle(cryptoProvider);
@@ -173,9 +189,11 @@ export async function buildProjectPackage(
     if (!(media.audio instanceof Blob) || media.audio.size !== document.audio.size) {
       throw new ProjectPackageError(`Audio "${document.audio.fileName}" is missing or its size does not match project metadata.`);
     }
+    if (totalSize + media.audio.size > MAX_TOTAL_MEDIA_BYTES) throw new ProjectPackageError('Project media exceeds this build’s portable-package safety guard. Your open project is unchanged; try smaller media copies and keep the originals.');
+    records.push(await packageRecord(
+      document.audio.id, 'audio', document.audio.fileName, document.audio.mimeType, media.audio, subtle, 0, approvedLimits,
+    ));
     totalSize += media.audio.size;
-    if (totalSize > MAX_TOTAL_MEDIA_BYTES) throw new ProjectPackageError('Project media exceeds this build’s portable-package safety guard. Your open project is unchanged; try smaller media copies and keep the originals.');
-    records.push(await packageRecord(document.audio.id, 'audio', document.audio.fileName, document.audio.mimeType, media.audio, subtle));
   } else if (media.audio !== null) {
     throw new ProjectPackageError('Project has unexpected audio media.');
   }
@@ -187,9 +205,9 @@ export async function buildProjectPackage(
     if (!(blob instanceof Blob) || blob.size !== asset.size) {
       throw new ProjectPackageError(`Media "${asset.fileName}" is missing or its size does not match project metadata.`);
     }
+    if (totalSize + blob.size > MAX_TOTAL_MEDIA_BYTES) throw new ProjectPackageError('Project media exceeds this build’s portable-package safety guard. Your open project is unchanged; try smaller media copies and keep the originals.');
+    records.push(await packageRecord(asset.id, asset.kind, asset.fileName, asset.mimeType, blob, subtle, totalSize, approvedLimits));
     totalSize += blob.size;
-    if (totalSize > MAX_TOTAL_MEDIA_BYTES) throw new ProjectPackageError('Project media exceeds this build’s portable-package safety guard. Your open project is unchanged; try smaller media copies and keep the originals.');
-    records.push(await packageRecord(asset.id, asset.kind, asset.fileName, asset.mimeType, blob, subtle));
   }
   const value: PackageDocument = {
     format: PACKAGE_FORMAT,
@@ -204,6 +222,7 @@ export async function buildProjectPackage(
 export async function parseProjectPackage(
   json: string,
   cryptoProvider: Crypto | undefined = globalThis.crypto,
+  approvedLimits?: ApprovedLimits,
 ): Promise<StoredProject> {
   if (typeof json !== 'string') throw new ProjectPackageError('Project package must be UTF-8 JSON text.');
   let parsed: unknown;
@@ -249,6 +268,15 @@ export async function parseProjectPackage(
       || (record.size as number) > MAX_MEDIA_BYTES) {
       throw new ProjectPackageError(`Media "${descriptor.fileName}" declared byte length does not match project metadata or exceeds this build's import safety guard.`);
     }
+    const limitError = approvedLimits
+      ? validateMediaAgainstApprovedLimits(
+        { name: descriptor.fileName, size: record.size as number },
+        totalSize,
+        descriptor.kind === 'audio' ? 'audio' : 'visual',
+        approvedLimits,
+      )
+      : null;
+    if (limitError) throw new ProjectPackageError(limitError);
     totalSize += record.size as number;
     if (totalSize > MAX_TOTAL_MEDIA_BYTES) throw new ProjectPackageError('Project media exceeds this build’s portable-package safety guard.');
     if (typeof record.sha256 !== 'string' || !/^[a-f0-9]{64}$/.test(record.sha256)) {

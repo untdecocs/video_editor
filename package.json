@@ -8,15 +8,21 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "npm run build:preview",
+    "build:preview": "tsc -b && vite build --mode preview",
+    "release:public": "tsc -b && vite build --mode production",
+    "release:beta": "tsc -b && vite build --mode private-beta",
+    "readiness:check": "node scripts/readiness-report.mjs --mode PUBLIC",
+    "readiness:dashboard": "node scripts/readiness-report.mjs --dashboard",
     "preview": "vite preview --host",
-    "test": "node --test src/services/timeline.test.mjs src/services/project.test.mjs src/services/projectStorage.test.mjs src/services/projectPackage.test.mjs src/services/mediaUrlRegistry.test.mjs src/services/history.test.mjs src/services/titleOverlay.test.mjs src/services/media.test.mjs src/services/videoMetadata.test.mjs src/services/audioMetadata.test.mjs"
+    "test": "node --test scripts/readiness.test.mjs src/config/productionUrl.test.mjs src/services/mediaLimitValidation.test.mjs src/services/timeline.test.mjs src/services/project.test.mjs src/services/projectStorage.test.mjs src/services/projectPackage.test.mjs src/services/mediaUrlRegistry.test.mjs src/services/history.test.mjs src/services/titleOverlay.test.mjs src/services/media.test.mjs src/services/imageMetadata.test.mjs src/services/videoMetadata.test.mjs src/services/audioMetadata.test.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
+    "@types/node": "^26.6.6",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^6.1.2",

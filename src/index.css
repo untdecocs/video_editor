@@ -1,4 +1,3 @@
-@import url('https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;600;700&display=swap');
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
@@ -6,7 +5,7 @@
 :root {
   color: #17221e;
   background: #f5f6f3;
-  font-family: 'DM Sans', sans-serif;
+  font-family: ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   -webkit-font-smoothing: antialiased;
@@ -22,8 +21,17 @@ button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px s
 input[type='range'] { accent-color: #28664d; }
 video, img { display: block; }
 [role='dialog'] { overscroll-behavior: contain; }
+summary::-webkit-details-marker { display: none; }
+.inspector-section > summary { display: flex; align-items: center; justify-content: space-between; gap: 1rem; }
+.inspector-section > summary::after { content: '⌄'; color: #737b76; font-size: 14px; font-weight: 400; transition: transform 120ms ease-out; }
+.inspector-section[open] > summary::after { transform: rotate(180deg); }
+.preview-workspace:fullscreen { display: flex; flex-direction: column; justify-content: center; gap: 1rem; width: 100vw; height: 100vh; max-height: 100vh; padding: 1.5rem; background: #101613; }
+.preview-workspace:fullscreen > div:first-child { flex: 1; min-height: 0; }
+.preview-workspace:fullscreen .preview-frame { width: auto !important; max-width: 100%; max-height: calc(100vh - 7rem); }
 
 @media (prefers-reduced-motion: no-preference) {
   main > section { animation: editor-enter 220ms ease-out both; }
+  .project-menu-enter { animation: project-menu-enter 120ms ease-out both; }
   @keyframes editor-enter { from { opacity: 0; transform: translateY(6px); } to { opacity: 1; transform: translateY(0); } }
+  @keyframes project-menu-enter { from { opacity: 0; transform: translateY(-4px) scale(.98); } to { opacity: 1; transform: translateY(0) scale(1); } }
 }

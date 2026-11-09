@@ -4,9 +4,10 @@ type ExportProgressProps = {
   progress: number;
   isExporting: boolean;
   statusMessage: string;
+  onCancel: () => void;
 };
 
-export function ExportProgress({ progress, isExporting, statusMessage }: ExportProgressProps) {
+export function ExportProgress({ progress, isExporting, statusMessage, onCancel }: ExportProgressProps) {
   const titleRef = useRef<HTMLHeadingElement>(null);
   useEffect(() => titleRef.current?.focus(), []);
 
@@ -24,7 +25,10 @@ export function ExportProgress({ progress, isExporting, statusMessage }: ExportP
           <div className="h-full bg-moss transition-[width] duration-300" style={{ width: `${progress}%` }} />
         </div>
         <p id="export-status" className="mt-4 text-sm text-neutral-600" role="status">{statusMessage}</p>
-        {isExporting && <p className="mt-6 border-t border-neutral-200 pt-4 text-xs text-neutral-400">Keep this tab open while your video is being rendered.</p>}
+        {isExporting && <div className="mt-6 flex items-center justify-between gap-4 border-t border-neutral-200 pt-4">
+          <p className="text-xs text-neutral-400">Keep this tab open while your video is being rendered.</p>
+          <button type="button" onClick={onCancel} className="shrink-0 rounded-md border border-neutral-300 px-3 py-2 text-xs font-semibold text-neutral-700 transition hover:bg-neutral-50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-moss">Cancel export</button>
+        </div>}
       </section>
     </div>
   );

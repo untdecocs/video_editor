@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState, type CSSProperties } from 'react';
 import { defaultTransform, getActiveClips, getClipSourceTime, type TimelineAsset, type TimelineClip, type TimelineTrack } from '../services/timeline';
 import {
   getPreviewPlaybackRejectionStatus,
@@ -19,9 +19,11 @@ type CompositionPreviewProps = {
   seekRevision: number;
   width: number;
   height: number;
+  className?: string;
+  style?: CSSProperties;
 };
 
-export function CompositionPreview({ assets, tracks, clips, titles, currentTime, isPlaying, seekRevision, width, height }: CompositionPreviewProps) {
+export function CompositionPreview({ assets, tracks, clips, titles, currentTime, isPlaying, seekRevision, width, height, className = '', style }: CompositionPreviewProps) {
   const videoElements = useRef(new Map<string, HTMLVideoElement>());
   const previousMappings = useRef(new Map<string, number>());
   const previousSeekRevision = useRef(-1);
@@ -92,8 +94,8 @@ export function CompositionPreview({ assets, tracks, clips, titles, currentTime,
 
   return (
     <div
-      className="relative mx-auto flex max-h-[58vh] w-full items-center justify-center overflow-hidden bg-neutral-950"
-      style={{ aspectRatio: `${width} / ${height}` }}
+      className={`relative mx-auto flex max-h-[58vh] w-full items-center justify-center overflow-hidden bg-neutral-950 ${className}`}
+      style={{ aspectRatio: `${width} / ${height}`, ...style }}
       aria-label="Video composition preview"
     >
       {active.length ? active.map(({ clip, asset }, layerIndex) => {

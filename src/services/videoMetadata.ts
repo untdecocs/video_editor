@@ -62,6 +62,7 @@ export function waitForVideoMetadata(
     video.addEventListener('error', onError);
     try {
       video.src = sourceUrl;
+      video.load();
     } catch {
       fail('The browser could not open this video.');
     }

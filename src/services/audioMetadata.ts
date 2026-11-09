@@ -62,6 +62,7 @@ export function waitForAudioMetadata(
     audio.addEventListener('error', onError);
     try {
       audio.src = sourceUrl;
+      audio.load();
     } catch {
       fail('The browser could not open this audio.');
     }

@@ -1,0 +1,31 @@
+{
+  "status": "PENDING_APPROVAL",
+  "approvedBy": null,
+  "approvedAt": null,
+  "approvalNotes": null,
+  "formatStatus": "PENDING_APPROVAL",
+  "supportedFormats": {
+    "audio": ["mp3", "wav", "aac", "m4a", "flac", "ogg", "wma"],
+    "image": ["jpg", "jpeg", "png", "webp", "bmp"],
+    "video": ["mp4", "mov", "webm", "m4v"],
+    "export": ["MP4", "WebM"]
+  },
+  "maxIndividualMediaFileBytes": null,
+  "maxTotalProjectBytes": null,
+  "minimumExportDurationSeconds": null,
+  "maximumExportDurationSeconds": null,
+  "testStatus": "NOT_COMPLETED",
+  "tests": {
+    "smallMediaFiles": "NOT_COMPLETED",
+    "largeMediaFiles": "NOT_COMPLETED",
+    "multipleMediaFiles": "NOT_COMPLETED",
+    "nearProjectLimit": "NOT_COMPLETED",
+    "shortExports": "NOT_COMPLETED",
+    "longExports": "NOT_COMPLETED",
+    "supportedBrowserMatrix": "NOT_COMPLETED",
+    "memoryAndPerformance": "NOT_COMPLETED",
+    "browserStorageConstraints": "NOT_COMPLETED"
+  },
+  "testedAt": null,
+  "testEvidence": []
+}

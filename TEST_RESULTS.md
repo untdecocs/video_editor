@@ -1,5 +1,94 @@
 # QA-01 Baseline Characterization and Production Follow-ups
 
+## Production-readiness gate implementation — 2026-11-09
+
+### Audit and changes
+
+- Confirmed a React 18/TypeScript/Vite client-only SPA, no router/backend/hosting workflow, IndexedDB project/media storage, browser-local exports, extension/MIME checks, bounded metadata/decode readers, package safety guards (256 MiB/media, 512 MiB/project media, 800 MiB package), and a structural 24-hour timeline ceiling.
+- Centralized production URL, CTA, metadata, release/privacy approvals, media format lists, and pending numeric media limits in `config/`.
+- Added a local, read-only readiness dashboard generated outside `dist`; it exposes no approval controls.
+- Added protected-allowlist validation and Vite production/private-beta mode build gates. `npm run build` explicitly creates a preview-mode build. `npm run release:public` was run and correctly failed closed for all currently missing gates.
+- Removed the Google Fonts external request and switched to system fonts. Source inspection found no app analytics, telemetry, cookies, or project-media upload path; host-provider services still require review.
+- Approved file/project/duration limits remain `PENDING_APPROVAL`; existing portable-package and timeline bounds remain technical safeguards, not product promises. File imports now enforce the centralized engineering safety caps before decoding, as well as approved limits when configured, while approvals are absent.
+
+### Validation
+
+| Check | Result |
+|---|---|
+| `npm test` | **91 passed, 0 failed** |
+| `npm run build` | **Passed**; preview mode |
+| `npm run release:public` | **Blocked as expected**; URL, CTA, release approver, legal/privacy owner/review, approved media limits, and representative media tests are missing |
+| `npm run readiness:dashboard` | **Passed**; generated a local report under `.production-readiness/`, outside `dist` |
+| `npm audit` | **0 vulnerabilities** |
+| `npm ls --depth=0` | **Passed** |
+
+This verifies the gate mechanics, not any human approval, legal compliance, target-browser media limit, or deployment-provider workflow. The repository has no provider-specific pipeline; any future one must deploy only a successful gated artifact and use protected environment allowlists/reviewers.
+
+## Editor workspace redesign — integrated browser verification — 2026-11-09
+
+### Changes exercised
+
+- At 1440×900, the preview and inspector render side-by-side (preview workspace 795×539px; inspector 530×517px), with a 1311px-wide timeline below both. At 1024px they remain side-by-side; at 768px and below they stack.
+- At viewport widths 1440, 1024, 768, 375, and 320 CSS px, document width did not exceed the viewport. The timeline stays inside its horizontally scrollable panel; no page-level horizontal overflow was observed.
+- Preview remained centered and retained the selected aspect ratio: landscape 16:9 and TikTok portrait 9:16 (294×522px in the 1440px viewport). Platform preset selection was restored to YouTube after the check.
+- Playback controls, playback-position scrubbing, volume, fullscreen entry/exit, format and frame-rate selection, timeline zoom, snap toggle, and track visibility/lock controls were exercised. Test settings were restored.
+- Still resizing through the existing duration field changed the clip width from 240px at 5 seconds to 144px at 3 seconds (48px/s), then restored it. A later pointer-drag check moved a clip from 10 seconds to 5.8 seconds.
+- The fixture contained a synthetic WAV and PNG, not a video clip. Native-browser video playback and audio/video synchronization remain unverified. Export and project-package follow-up results are recorded below.
+
+### Assessment
+
+The responsive workspace and inspector controls passed integrated-browser spot checks. This is not native browser/OS matrix signoff, full accessibility validation, or production export validation. Clip drag/drop should be confirmed with a native pointer workflow.
+
+## Export and project-package follow-up — 2026-11-09
+
+### Export lifecycle and MP4 artifact
+
+- Export now supports cancellation, preparation/finalization status, bounded video media loading, final `MediaRecorder` data flushing, and validation before the result is returned for download.
+- In integrated Electron/Chromium, canceling an export stopped the operation, closed the dialog, and left the project intact.
+- A 3-second MP4 export passed the app's output validation and was captured from the generated Blob for byte-level inspection. The 49,581-byte artifact contained MP4 boxes and `soun`/`vide` tracks, reported 1920×1080 dimensions, and approximately 2.943 seconds duration.
+- A 0.1-second export generated a small but undecodable file. The new validator rejected it rather than reporting success. Minimum supported soundtrack duration remains a product decision.
+- This test does not verify native-browser download UX or independent decoding with an external media tool; FFmpeg/FFprobe are unavailable. Approved native-browser output verification remains open.
+
+### Video-inclusive portable project package
+
+- Exported a 450,382-byte package containing one synthetic WAV, three image entries, and one MP4 entry.
+- Independently parsed the package and verified exact byte sizes and SHA-256 hashes for all five embedded media records.
+- Imported the package in integrated Chromium, confirmed all four visual clips (three images and the video) appeared on the timeline, reloaded, and confirmed the imported project and video clip were recovered.
+- This supplements the earlier audio/image roundtrip. It does not replace native target-browser package testing or provide a storage durability guarantee.
+
+### Automated validation
+
+| Check | Result |
+|---|---|
+| Complete `npm test` suite | **72 passed, 0 failed** |
+| TypeScript and production build | **Passed** |
+| `npm audit` | **0 vulnerabilities** |
+| `git diff --check` | **Passed** |
+
+Temporary test projects and the loopback QA servers were removed/stopped after verification. This integrated-runtime evidence does not close the native browser/OS matrix or the broader launch gates.
+
+## Launch remediation follow-up — 2026-11-09
+
+### Changes exercised
+
+- Updated audio and video metadata readers to call `load()` after assigning the Blob URL. Saved-project video rehydration now uses the bounded video metadata helper; project storage is not marked ready until the initial recovery attempt completes.
+- In integrated Electron/Chromium (**Chrome 150.0.7871.250**), imported a generated 3-second PCM WAV and a 64×48 PNG, saved them to browser storage, reloaded, and confirmed both media items were restored. This does not close the native Chrome/Edge failures recorded below.
+- Project toolbar menu: verified eight secondary actions render, Undo/Redo disabled states appear, Escape closes and returns focus to the trigger, and an outside click closes the menu. At 320 CSS px, the menu stayed within viewport bounds.
+- A 320px editor check initially found 822px document overflow from preview sizing; the preview/settings and timeline controls were constrained/wrapped. Follow-up measured `documentWidth=320`, `bodyWidth=320`.
+- In the integrated runtime, `MediaRecorder.isTypeSupported()` accepted WebM, but `video.canPlayType()` returned empty for both VP9 and VP8. Duration-adaptive recording cadence produced a 20,681-byte WebM Blob for a 0.5-second fixture and a 68,367-byte WebM Blob for a 3-second fixture; the latter had EBML signature `1a45dfa3`. The runtime failed to decode that WebM output (`DEMUXER_ERROR_COULD_NOT_OPEN`); this was one failed format/runtime experiment, not evidence that the later MP4 artifact passed native-browser validation.
+- A 0.1-second fixture still produced a zero-byte recording after reducing the data cadence. Renderer now rejects zero-byte output; the UI returned `Export failed: The browser produced an empty video file...` rather than claiming completion. The supported minimum duration remains a product decision; do not imply this edge case is fixed.
+
+### Automated validation
+
+| Check | Result |
+|---|---|
+| Targeted metadata and persistence tests | **13 passed, 0 failed** |
+| Complete suite | **69 passed, 0 failed** at this earlier checkpoint; current result is 72/72 above |
+| TypeScript and production build | **Passed** on the final code changes |
+| `git diff --check` | **Passed** on the final code changes |
+
+At this checkpoint, the approved native browser/OS matrix, app-generated output inspection, project-package disk inspection, and final dependency audit remained open. The follow-up above closes package disk/hash inspection for the exercised fixture but does not close native target-browser signoff or the wider release gates.
+
 ## Launch gate #2 — native browser/OS workflow attempt — 2026-11-08
 
 **Disposition:** **BLOCKED / NOT CLOSED.** This attempt did not validate the approved Windows 11/macOS matrix. It used the actual installed desktop Chrome and Edge executables (not Electron and not headless) on the available Windows 10 host. Successful exploratory cases on that unsupported OS are not compatibility signoff.
@@ -106,7 +195,7 @@ Measured host: Windows 10 build 19045 x64; AMD Ryzen 5 5500, 12 logical CPUs, 16
 
 **Integrity scope:** SHA-256 covers each source-media payload. The project document receives strict version/schema validation but is not cryptographically signed or authenticated; hashes do not establish package provenance.
 
-**Open validation:** Download and independently inspect a project package from disk; exercise approved target browsers/OSes; characterize browser memory for representative audio/image/video projects; reproduce the native Chrome synthetic-WAV metadata timeout; assign legal/privacy owner; supply production URL/CTA and explicit release authorization. The current benchmark is insufficient to recommend numeric product media limits. Official status remains **NOT READY**; keep release private.
+**Open validation:** Exercise approved target browsers/OSes; independently decode the captured app-generated MP4 with an external media tool and verify native download UX; characterize browser memory for representative audio/image/video projects; reproduce the native Chrome synthetic-WAV metadata timeout; assign a legal/privacy owner; supply production URL/CTA and explicit release authorization. The video-inclusive project package passed disk hash/size inspection and integrated import/reload for this fixture. The current benchmark is insufficient to recommend numeric product media limits. Official status remains **NOT READY**; keep release private.
 
 ## Initial production readiness checkpoint — 2026-11-08 (before package implementation)
 
@@ -142,7 +231,7 @@ The same isolated run saved an empty project named `QA-temp-recovery`, reloaded 
 
 ### Launch-readiness interpretation
 
-Current automated/build/dependency checks pass, and current Chrome/Edge can render the initial production screen. The exact supported browser/OS matrix, measured media limits, portable project-file requirement, actual launch URL/CTA, legal/privacy ownership, and commercial scope remain unapproved. Native Firefox/Safari are unavailable in this environment. End-to-end browser export and downloaded-file validation remain outstanding. See `LAUNCH_READINESS_REPORT.md` for the complete readiness decision, open decisions, owners, and launch checklist. **Official production launch status: NOT READY.**
+At this checkpoint, automated/build/dependency checks passed and Chrome/Edge rendered the initial production screen. The supported browser/OS matrix and portable project-file requirement had been recorded, but target-matrix validation and downloaded-file testing remained open; product media limits, actual launch URL/CTA, and legal/privacy ownership were unresolved. Native Firefox/Safari were unavailable in this environment. See the latest report above for current evidence and the complete launch gates. **Official production launch status: NOT READY.**
 
 ---
 
