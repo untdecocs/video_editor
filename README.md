@@ -31,3 +31,5 @@ Timeline helper tests use Node's built-in test runner. The app uses Tailwind CSS
 ## Browser export support
 
 Export is rendered locally with canvas capture, Web Audio, and `MediaRecorder`. MP4 and WebM availability depends on the browser's recorder implementation; the app checks supported MIME types before recording. Safari support varies by macOS/iOS release and selected codec. Exports can be CPU- and memory-intensive for long, high-resolution projects. The browser downloads the finished file when recording completes.
+
+While exporting (inside the progress dialog) and after a successful render, an optional [Buy me a coffee](https://buymeacoffee.com/alexmano12) link lets users support the creator. It opens in a new tab and does not change the exported video or interrupt the download.

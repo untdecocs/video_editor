@@ -26,8 +26,10 @@ function project() {
     name: 'Recovery cut',
     createdAt: '2026-11-02T12:00:00.000Z',
     updatedAt: '2026-11-02T12:05:00.000Z',
-    schemaVersion: 5,
-    audio: { id: 'audio-1', fileName: 'track.wav', mimeType: 'audio/wav', size: 4, duration: 12 },
+    schemaVersion: 6,
+    audioAssets: [{ id: 'audio-1', fileName: 'track.wav', mimeType: 'audio/wav', size: 4, duration: 12 }],
+    audioTracks: [{ id: 'audio-track-1', name: 'Audio 1', order: 0, visible: true, locked: false }],
+    audioClips: [{ id: 'audio-clip-1', assetId: 'audio-1', trackId: 'audio-track-1', timelinePosition: 0, start: 0, end: 12, volume: 1 }],
     assets: [{
       id: 'visual-1',
       fileName: 'still.png',
@@ -57,7 +59,7 @@ function project() {
 
 function media() {
   return {
-    audio: new Blob(['1234'], { type: 'audio/wav' }),
+    audioAssets: { 'audio-1': new Blob(['1234'], { type: 'audio/wav' }) },
     assets: { 'visual-1': new Blob(['12345'], { type: 'image/png' }) },
   };
 }
@@ -76,7 +78,7 @@ test('persists validated project metadata and source Blobs, then restores edits'
   }]);
   const restored = await storage.loadProject(document.id);
   assert.deepEqual(restored.document, document);
-  assert.equal(await restored.media.audio.text(), '1234');
+  assert.equal(await restored.media.audioAssets['audio-1'].text(), '1234');
   assert.equal(await restored.media.assets['visual-1'].text(), '12345');
 });
 
@@ -88,7 +90,7 @@ test('rejects missing or truncated blobs without overwriting the existing record
 
   await assert.rejects(
     storage.saveProject({ ...original, name: 'Changed' }, {
-      audio: new Blob(['1234']),
+      audioAssets: { 'audio-1': new Blob(['1234']) },
       assets: { 'visual-1': new Blob(['no']) },
     }),
     /incomplete or corrupted/,

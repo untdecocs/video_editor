@@ -9,6 +9,8 @@ import {
   type TimelineMarker,
   type TimelineTrack,
   type VisualTransform,
+  type AudioClip,
+  type AudioTrack,
 } from './timeline.ts';
 import { TITLE_FONT_FAMILIES, type TitleAlignment, type TitleOverlay } from './titleOverlay.ts';
 
@@ -25,7 +27,7 @@ export type ProjectVisualAsset = {
   duration: number;
 };
 
-/** JSON-safe metadata for the app's single runtime audio File. */
+/** JSON-safe metadata for an audio source file used by one or more clips. */
 export type ProjectAudioAsset = {
   id: string;
   fileName: string;
@@ -43,7 +45,7 @@ export type ProjectOutputSettings = {
 };
 
 /**
- * Version 5 of the storage-agnostic project document.
+ * Version 6 of the storage-agnostic project document.
  * TimelineClip and VisualTransform are the same edit values used at runtime.
  */
 export type ProjectDocument = {
@@ -51,8 +53,10 @@ export type ProjectDocument = {
   name: string;
   createdAt: string;
   updatedAt: string;
-  schemaVersion: 5;
-  audio: ProjectAudioAsset | null;
+  schemaVersion: 6;
+  audioAssets: ProjectAudioAsset[];
+  audioTracks: AudioTrack[];
+  audioClips: AudioClip[];
   assets: ProjectVisualAsset[];
   tracks: TimelineTrack[];
   clips: TimelineClip[];
@@ -188,12 +192,12 @@ function validateTransform(value: unknown, path: string): VisualTransform {
   };
 }
 
-function validateClip(value: unknown, index: number, version: 1 | 2 | 3 | 4 | 5): TimelineClip {
+function validateClip(value: unknown, index: number, version: 1 | 2 | 3 | 4 | 5 | 6): TimelineClip {
   const path = `clips[${index}]`;
   const clip = recordAt(value, path);
   exactKeys(clip, path, version === 1
     ? ['id', 'assetId', 'start', 'end', 'stillDuration', 'transition', 'transform']
-    : version === 5
+    : version >= 5
       ? ['id', 'assetId', 'trackId', 'timelinePosition', 'start', 'end', 'stillDuration', 'stillDurationMode', 'transition', 'transform']
       : ['id', 'assetId', 'trackId', 'timelinePosition', 'start', 'end', 'stillDuration', 'transition', 'transform']);
   if (clip.transition !== 'none' && clip.transition !== 'fade') {
@@ -202,8 +206,9 @@ function validateClip(value: unknown, index: number, version: 1 | 2 | 3 | 4 | 5)
   const start = numberAt(clip.start, `${path}.start`, { minimum: 0 });
   const end = numberAt(clip.end, `${path}.end`, { minimum: 0 });
   if (end < start) return fail(`${path}.end`, 'must be greater than or equal to start');
-  if (version === 5 && clip.stillDurationMode !== 'custom' && clip.stillDurationMode !== 'match-audio') {
-    return fail(`${path}.stillDurationMode`, 'expected "custom" or "match-audio"');
+  if (version >= 5 && clip.stillDurationMode !== 'custom' && clip.stillDurationMode !== 'match-audio'
+    && !(version >= 6 && clip.stillDurationMode === 'match-video')) {
+    return fail(`${path}.stillDurationMode`, 'expected "custom", "match-audio", or "match-video"');
   }
   return {
     id: stringAt(clip.id, `${path}.id`),
@@ -215,7 +220,7 @@ function validateClip(value: unknown, index: number, version: 1 | 2 | 3 | 4 | 5)
     start,
     end,
     stillDuration: numberAt(clip.stillDuration, `${path}.stillDuration`, { minimum: Number.MIN_VALUE }),
-    stillDurationMode: version === 5
+    stillDurationMode: version >= 5
       ? clip.stillDurationMode as TimelineClip['stillDurationMode']
       : 'custom',
     transition: clip.transition,
@@ -323,6 +328,41 @@ function validateTrack(value: unknown, index: number): TimelineTrack {
   };
 }
 
+function validateAudioTrack(value: unknown, index: number): AudioTrack {
+  const path = `audioTracks[${index}]`;
+  const track = recordAt(value, path);
+  exactKeys(track, path, ['id', 'name', 'order', 'visible', 'locked']);
+  if (typeof track.visible !== 'boolean') return fail(`${path}.visible`, 'expected a boolean');
+  if (typeof track.locked !== 'boolean') return fail(`${path}.locked`, 'expected a boolean');
+  return {
+    id: stringAt(track.id, `${path}.id`),
+    name: stringAt(track.name, `${path}.name`),
+    order: numberAt(track.order, `${path}.order`, { minimum: 0, integer: true }),
+    visible: track.visible,
+    locked: track.locked,
+  };
+}
+
+function validateAudioClip(value: unknown, index: number): AudioClip {
+  const path = `audioClips[${index}]`;
+  const clip = recordAt(value, path);
+  exactKeys(clip, path, ['id', 'assetId', 'trackId', 'timelinePosition', 'start', 'end', 'volume']);
+  const start = numberAt(clip.start, `${path}.start`, { minimum: 0 });
+  const end = numberAt(clip.end, `${path}.end`, { minimum: 0 });
+  if (end <= start) return fail(`${path}.end`, 'must be greater than start');
+  const volume = numberAt(clip.volume, `${path}.volume`, { minimum: 0 });
+  if (volume > 2) return fail(`${path}.volume`, 'must be at most 2');
+  return {
+    id: stringAt(clip.id, `${path}.id`),
+    assetId: stringAt(clip.assetId, `${path}.assetId`),
+    trackId: stringAt(clip.trackId, `${path}.trackId`),
+    timelinePosition: numberAt(clip.timelinePosition, `${path}.timelinePosition`, { minimum: 0 }),
+    start,
+    end,
+    volume,
+  };
+}
+
 function validateOutputSettings(value: unknown): ProjectOutputSettings {
   const path = 'outputSettings';
   const settings = recordAt(value, path);
@@ -353,8 +393,8 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
   const path = 'project';
   const project = recordAt(value, path);
   const version = project.schemaVersion;
-  if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5) {
-    return fail('schemaVersion', `unsupported schema version ${String(version)} (supported: 1, 2, 3, 4, 5)`);
+  if (version !== 1 && version !== 2 && version !== 3 && version !== 4 && version !== 5 && version !== 6) {
+    return fail('schemaVersion', `unsupported schema version ${String(version)} (supported: 1, 2, 3, 4, 5, 6)`);
   }
   exactKeys(project, path, version === 1 ? [
     'id',
@@ -402,6 +442,21 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
     'outputSettings',
     'titleOverlays',
     'markers',
+  ] : version === 6 ? [
+    'id',
+    'name',
+    'createdAt',
+    'updatedAt',
+    'schemaVersion',
+    'audioAssets',
+    'audioTracks',
+    'audioClips',
+    'assets',
+    'tracks',
+    'clips',
+    'titleOverlays',
+    'markers',
+    'outputSettings',
   ] : [
     'id',
     'name',
@@ -421,6 +476,9 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
   if (version >= 2 && !Array.isArray(project.tracks)) return fail('tracks', 'expected an array');
   if (version >= 3 && !Array.isArray(project.titleOverlays)) return fail('titleOverlays', 'expected an array');
   if (version >= 4 && !Array.isArray(project.markers)) return fail('markers', 'expected an array');
+  if (version === 6 && (!Array.isArray(project.audioAssets) || !Array.isArray(project.audioTracks) || !Array.isArray(project.audioClips))) {
+    return fail('audioAssets/audioTracks/audioClips', 'expected arrays');
+  }
 
   const projectId = stringAt(project.id, 'project.id');
   const name = stringAt(project.name, 'project.name');
@@ -439,7 +497,41 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
       return positioned;
     });
   }
-  const audio = validateAudio(project.audio);
+  const legacyAudio = version < 6 ? validateAudio(project.audio) : null;
+  const audioAssets = version === 6
+    ? (project.audioAssets as unknown[]).map((asset, index) => {
+      const path = `audioAssets[${index}]`;
+      const record = recordAt(asset, path);
+      exactKeys(record, path, ['id', 'fileName', 'mimeType', 'size', 'duration']);
+      return {
+        id: stringAt(record.id, `${path}.id`),
+        fileName: stringAt(record.fileName, `${path}.fileName`),
+        mimeType: stringAt(record.mimeType, `${path}.mimeType`, true),
+        size: numberAt(record.size, `${path}.size`, { minimum: 0, integer: true }),
+        duration: numberAt(record.duration, `${path}.duration`, { minimum: 0 }),
+      };
+    })
+    : legacyAudio ? [legacyAudio] : [];
+  const audioTracks = version === 6
+    ? (project.audioTracks as unknown[]).map(validateAudioTrack)
+    : legacyAudio && legacyAudio.duration > 0 ? [{
+      id: `${legacyAudio.id}-track`,
+      name: 'Audio 1',
+      order: 0,
+      visible: true,
+      locked: false,
+    }] : [];
+  const audioClips = version === 6
+    ? (project.audioClips as unknown[]).map(validateAudioClip)
+    : legacyAudio && legacyAudio.duration > 0 ? [{
+      id: `${legacyAudio.id}-clip`,
+      assetId: legacyAudio.id,
+      trackId: `${legacyAudio.id}-track`,
+      timelinePosition: 0,
+      start: 0,
+      end: legacyAudio.duration,
+      volume: 1,
+    }] : [];
   const titleOverlays = version >= 3
     ? (project.titleOverlays as unknown[]).map(validateTitleOverlay)
     : [];
@@ -449,10 +541,12 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
   const ids = new Set<string>();
   const entityIds = [
     projectId,
-    ...(audio ? [audio.id] : []),
+    ...audioAssets.map((asset) => asset.id),
     ...assets.map((asset) => asset.id),
     ...tracks.map((track) => track.id),
+    ...audioTracks.map((track) => track.id),
     ...clips.map((clip) => clip.id),
+    ...audioClips.map((clip) => clip.id),
     ...titleOverlays.map((title) => title.id),
     ...markers.map((marker) => marker.id),
   ];
@@ -476,7 +570,7 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
       return fail(`clips[${index}].trackId`, `references missing visual track "${clip.trackId}"`);
     }
     const asset = assets.find((item) => item.id === clip.assetId);
-    if (version === 5 && asset?.kind === 'image') {
+    if (version >= 5 && asset?.kind === 'image') {
       if (clip.stillDuration < MIN_STILL_DURATION || clip.stillDuration > MAX_TIMELINE_DURATION) {
         return fail(`clips[${index}].stillDuration`, 'still duration must be between 0.1 seconds and 24 hours');
       }
@@ -485,14 +579,34 @@ export function validateProjectDocument(value: unknown): ProjectDocument {
       }
     }
   }
+  const audioAssetIds = new Set(audioAssets.map((asset) => asset.id));
+  const audioTrackIds = new Set(audioTracks.map((track) => track.id));
+  for (const [index, track] of audioTracks.entries()) {
+    if (audioTracks.findIndex((other) => other.order === track.order) !== index) {
+      return fail(`audioTracks[${index}].order`, 'track order values must be unique');
+    }
+  }
+  for (const [index, clip] of audioClips.entries()) {
+    if (!audioAssetIds.has(clip.assetId)) return fail(`audioClips[${index}].assetId`, `references missing audio asset "${clip.assetId}"`);
+    if (!audioTrackIds.has(clip.trackId)) return fail(`audioClips[${index}].trackId`, `references missing audio track "${clip.trackId}"`);
+    const audioAsset = audioAssets.find((asset) => asset.id === clip.assetId);
+    if (audioAsset && clip.end > audioAsset.duration) {
+      return fail(`audioClips[${index}].end`, 'must not exceed the source audio duration');
+    }
+    if (clip.timelinePosition + clip.end - clip.start > MAX_TIMELINE_DURATION) {
+      return fail(`audioClips[${index}]`, 'audio timing must remain within 24 hours');
+    }
+  }
 
   return {
     id: projectId,
     name,
     createdAt,
     updatedAt,
-    schemaVersion: 5,
-    audio,
+    schemaVersion: 6,
+    audioAssets,
+    audioTracks,
+    audioClips,
     assets,
     tracks,
     clips,

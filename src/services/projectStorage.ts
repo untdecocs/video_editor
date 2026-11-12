@@ -5,7 +5,7 @@ const DATABASE_VERSION = 1;
 const STORE_NAME = 'projects';
 
 export type ProjectMediaBlobs = {
-  audio: Blob | null;
+  audioAssets: Record<string, Blob>;
   assets: Record<string, Blob>;
 };
 
@@ -60,18 +60,34 @@ function validateStoredProject(value: unknown): StoredProject {
     throw new ProjectStorageError(`This saved project is malformed and cannot be opened: ${detail}`);
   }
 
+  const rawDocument = value.document;
+  const legacyDocument = isRecord(rawDocument) && typeof rawDocument.schemaVersion === 'number' && rawDocument.schemaVersion < 6;
   const media = value.media;
-  if (!isRecord(media) || Object.keys(media).some((key) => key !== 'audio' && key !== 'assets')) {
+  if (!isRecord(media) || Object.keys(media).some((key) => key !== 'audio' && key !== 'audioAssets' && key !== 'assets')) {
     throw new ProjectStorageError('This saved project has a malformed media collection and cannot be opened.');
   }
   if (!isRecord(media.assets)) {
     throw new ProjectStorageError('This saved project has a malformed visual-media collection and cannot be opened.');
   }
-
-  const audioBlob = media.audio;
-  if (document.audio) assertBlob(audioBlob, document.audio.fileName, document.audio.size);
-  else if (audioBlob !== null) {
-    throw new ProjectStorageError('This saved project has unexpected audio data and cannot be opened.');
+  const audioBlobs = isRecord(media.audioAssets) ? media.audioAssets : {};
+  if (!legacyDocument && !isRecord(media.audioAssets)) {
+    throw new ProjectStorageError('This saved project has a malformed audio-media collection and cannot be opened.');
+  }
+  const legacyAudioBlob = media.audio;
+  if (legacyDocument && document.audioAssets.length === 1) {
+    assertBlob(legacyAudioBlob, document.audioAssets[0].fileName, document.audioAssets[0].size);
+    audioBlobs[document.audioAssets[0].id] = legacyAudioBlob;
+  } else if (legacyAudioBlob !== null && legacyAudioBlob !== undefined) {
+    throw new ProjectStorageError('This saved project has unexpected legacy audio data and cannot be opened.');
+  }
+  const audioAssetBlobs: Record<string, Blob> = {};
+  for (const asset of document.audioAssets) {
+    const blob = audioBlobs[asset.id];
+    assertBlob(blob, asset.fileName, asset.size);
+    audioAssetBlobs[asset.id] = blob;
+  }
+  if (Object.keys(audioBlobs).some((id) => !document.audioAssets.some((asset) => asset.id === id))) {
+    throw new ProjectStorageError('This saved project contains unexpected audio media and cannot be opened.');
   }
 
   const assetBlobs: Record<string, Blob> = {};
@@ -86,18 +102,23 @@ function validateStoredProject(value: unknown): StoredProject {
 
   return {
     document,
-    media: { audio: document.audio ? audioBlob as Blob : null, assets: assetBlobs },
+    media: { audioAssets: audioAssetBlobs, assets: assetBlobs },
   };
 }
 
 function validateForStorage(documentValue: ProjectDocument, media: ProjectMediaBlobs): StoredProject {
   const document = validateProjectDocument(documentValue);
-  if (!isRecord(media) || !isRecord(media.assets)) {
+  if (!isRecord(media) || !isRecord(media.assets) || !isRecord(media.audioAssets)) {
     throw new ProjectStorageError('Project media could not be saved because its data is malformed.');
   }
-  if (document.audio) assertBlob(media.audio, document.audio.fileName, document.audio.size);
-  else if (media.audio !== null) {
-    throw new ProjectStorageError('Project audio changed before saving. Retry the save.');
+  const audioAssetBlobs: Record<string, Blob> = {};
+  for (const asset of document.audioAssets) {
+    const blob = media.audioAssets[asset.id];
+    assertBlob(blob, asset.fileName, asset.size);
+    audioAssetBlobs[asset.id] = blob;
+  }
+  if (Object.keys(media.audioAssets).some((id) => !document.audioAssets.some((asset) => asset.id === id))) {
+    throw new ProjectStorageError('Project media contains unexpected audio data.');
   }
   const assetBlobs: Record<string, Blob> = {};
   for (const asset of document.assets) {
@@ -110,7 +131,7 @@ function validateForStorage(documentValue: ProjectDocument, media: ProjectMediaB
   }
   return {
     document,
-    media: { audio: document.audio ? media.audio as Blob : null, assets: assetBlobs },
+    media: { audioAssets: audioAssetBlobs, assets: assetBlobs },
   };
 }
 

@@ -4,7 +4,7 @@ import { formatDuration, getSupportedFormatsLabel, audioExtensions } from '../se
 const audioAccept = audioExtensions.map((extension) => `.${extension}`).join(',');
 
 type AudioUploaderProps = {
-  onFileSelect: (file: File) => void;
+  onFilesSelect: (files: File[]) => void;
   fileName: string;
   fileSize: string;
   detectedType: string;
@@ -12,7 +12,7 @@ type AudioUploaderProps = {
 };
 
 export function AudioUploader({
-  onFileSelect,
+  onFilesSelect,
   fileName,
   fileSize,
   detectedType,
@@ -21,10 +21,8 @@ export function AudioUploader({
   const inputRef = useRef<HTMLInputElement | null>(null);
 
   const handleFiles = (fileList: FileList | null) => {
-    const selectedFile = fileList?.[0];
-    if (selectedFile) {
-      onFileSelect(selectedFile);
-    }
+    const files = Array.from(fileList ?? []);
+    if (files.length) onFilesSelect(files);
     if (inputRef.current) inputRef.current.value = '';
   };
 
@@ -42,6 +40,7 @@ export function AudioUploader({
           ref={inputRef}
           id="audio-upload"
           type="file"
+          multiple
           accept={audioAccept}
           className="sr-only"
           onChange={(event) => handleFiles(event.target.files)}

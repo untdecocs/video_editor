@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { AudioUploader } from './components/AudioUploader';
+import { AudioTimelinePlayback } from './components/AudioTimelinePlayback';
 import { CompositionPreview } from './components/CompositionPreview';
 import { ExportProgress } from './components/ExportProgress';
 import { approvedProductionLinks } from './config/production';
@@ -34,7 +35,11 @@ import {
   defaultTransform,
   getClipDuration,
   getTimelineDuration,
+  getVisualCoverage,
   defaultVideoTrack,
+  getAudioTimelineDuration,
+  getAudioClipDuration,
+  getVideoTimelineDuration,
   duplicateTimelineClip,
   platformPresets,
   snapTimelinePosition,
@@ -49,6 +54,9 @@ import {
   type TimelineAsset,
   type TimelineClip,
   type TimelineMarker,
+  type AudioAsset,
+  type AudioClip,
+  type AudioTrack,
   type VisualTransform,
 } from './services/timeline';
 
@@ -56,8 +64,9 @@ const steps = ['Audio', 'Visuals', 'Edit & export'];
 const HISTORY_LIMIT = 50;
 
 type EditSnapshot = {
-  audioFile: File | null;
-  audioDuration: number;
+  audioAssets: Array<Pick<AudioAsset, 'id' | 'file' | 'duration'>>;
+  audioTracks: AudioTrack[];
+  audioClips: AudioClip[];
   assets: Array<Pick<TimelineAsset, 'id' | 'file' | 'kind' | 'duration'>>;
   tracks: TimelineTrack[];
   clips: TimelineClip[];
@@ -118,15 +127,18 @@ function App() {
   const [projectToOpen, setProjectToOpen] = useState('');
   const [projectStorageStatus, setProjectStorageStatus] = useState('Checking local project storage…');
   const [isProjectStorageReady, setIsProjectStorageReady] = useState(false);
-  const [audioFile, setAudioFile] = useState<File | null>(null);
-  const [audioUrl, setAudioUrl] = useState<string | null>(null);
-  const [audioDuration, setAudioDuration] = useState(0);
+  const [audioAssets, setAudioAssets] = useState<AudioAsset[]>([]);
+  const [audioTracks, setAudioTracks] = useState<AudioTrack[]>([]);
+  const [audioClips, setAudioClips] = useState<AudioClip[]>([]);
+  const audioFile = audioAssets[0]?.file ?? null;
+  const audioDuration = getAudioTimelineDuration(audioClips);
   const [assets, setAssets] = useState<TimelineAsset[]>([]);
   const [clips, setClips] = useState<TimelineClip[]>([]);
   const [tracks, setTracks] = useState<TimelineTrack[]>([defaultVideoTrack()]);
   const [titles, setTitles] = useState<TitleOverlay[]>([]);
   const [markers, setMarkers] = useState<TimelineMarker[]>([]);
   const [selectedClipId, setSelectedClipId] = useState('');
+  const [selectedAudioClipId, setSelectedAudioClipId] = useState('');
   const [selectedTitleId, setSelectedTitleId] = useState('');
   const [currentTime, setCurrentTime] = useState(0);
   const [previewSeekRevision, setPreviewSeekRevision] = useState(0);
@@ -136,6 +148,12 @@ function App() {
   const [customHeight, setCustomHeight] = useState(1080);
   const [frameRate, setFrameRate] = useState(30);
   const [format, setFormat] = useState('MP4');
+  const availableExportFormats = useMemo(
+    () => ['MP4', 'WebM'].filter((candidate) => getSupportedMimeType(candidate) !== null),
+    [],
+  );
+  const sequenceDuration = Math.max(audioDuration, getTimelineDuration(clips), ...titles.map((title) => title.start + title.duration), 0);
+  const videoDuration = getVideoTimelineDuration(clips, assets, tracks);
   const [canUndo, setCanUndo] = useState(false);
   const [canRedo, setCanRedo] = useState(false);
   const [isProjectMenuOpen, setIsProjectMenuOpen] = useState(false);
@@ -149,11 +167,16 @@ function App() {
   const [isExporting, setIsExporting] = useState(false);
   const [exportProgress, setExportProgress] = useState(0);
   const [exportComplete, setExportComplete] = useState(false);
-  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const visualCoverage = useMemo(
+    () => getVisualCoverage(clips, assets, sequenceDuration, tracks),
+    [clips, assets, sequenceDuration, tracks],
+  );
+  const playbackTimeRef = useRef(0);
   const mainRef = useRef<HTMLElement | null>(null);
   const previewContainerRef = useRef<HTMLDivElement | null>(null);
   const projectMenuRef = useRef<HTMLDivElement | null>(null);
   const projectMenuButtonRef = useRef<HTMLButtonElement | null>(null);
+  const editorHeadingRef = useRef<HTMLHeadingElement | null>(null);
   const exportButtonRef = useRef<HTMLButtonElement | null>(null);
   const exportAbortControllerRef = useRef<AbortController | null>(null);
   const wasExportingRef = useRef(false);
@@ -167,8 +190,9 @@ function App() {
   projectListRef.current = projectList;
 
   const makeEditSnapshot = (overrides: Partial<EditSnapshot> = {}): EditSnapshot => ({
-    audioFile,
-    audioDuration,
+    audioAssets: audioAssets.map(({ id, file, duration }) => ({ id, file, duration })),
+    audioTracks,
+    audioClips,
     assets: assets.map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
     tracks,
     clips,
@@ -187,9 +211,13 @@ function App() {
     setCanRedo(historyRef.current?.canRedo() ?? false);
   };
 
-  const recordEdit = (snapshot: EditSnapshot) => {
-    historyRef.current?.push(snapshot);
+  const recordEdit = (snapshot: EditSnapshot, coalescingKey?: string) => {
+    historyRef.current?.push(snapshot, coalescingKey);
     syncHistoryButtons();
+  };
+
+  const endEditCoalescing = () => {
+    historyRef.current?.endCoalescing();
   };
 
   const resetEditHistory = (snapshot: EditSnapshot) => {
@@ -204,20 +232,22 @@ function App() {
       newUrls.push(url);
       return { ...asset, url };
     });
-    const restoredAudioUrl = snapshot.audioFile ? urlsRef.current.create(snapshot.audioFile) : null;
-    if (restoredAudioUrl) newUrls.push(restoredAudioUrl);
-
-    audioRef.current?.pause();
-    audioRef.current?.removeAttribute('src');
-    audioRef.current?.load();
+    const restoredAudioAssets: AudioAsset[] = snapshot.audioAssets.map((asset) => {
+      const url = urlsRef.current.create(asset.file);
+      newUrls.push(url);
+      return { ...asset, url };
+    });
     urlsRef.current.replace(newUrls);
 
-    setAudioFile(snapshot.audioFile);
-    setAudioUrl(restoredAudioUrl);
-    setAudioDuration(snapshot.audioDuration);
+    setAudioAssets(restoredAudioAssets);
+    setAudioTracks(snapshot.audioTracks);
+    setAudioClips(snapshot.audioClips);
     setAssets(restoredAssets);
     setTracks(snapshot.tracks);
     setClips(snapshot.clips);
+    setSelectedAudioClipId((current) => snapshot.audioClips.some((clip) => clip.id === current)
+      ? current
+      : (snapshot.audioClips[0]?.id ?? ''));
     setSelectedTitleId((current) => snapshot.titles.some((title) => title.id === current)
       ? current
       : (snapshot.titles[0]?.id ?? ''));
@@ -248,14 +278,17 @@ function App() {
   const preset = platformPresets.find((item) => item.id === presetId) ?? platformPresets[0];
   const width = presetId === 'custom' ? customWidth : preset.width;
   const height = presetId === 'custom' ? customHeight : preset.height;
-  const timelineDuration = getTimelineDuration(clips);
+  const selectedClip = clips.find((clip) => clip.id === selectedClipId);
+  const selectedAudioClip = audioClips.find((clip) => clip.id === selectedAudioClipId);
+  const selectedTrack = tracks.find((track) => track.id === selectedClip?.trackId);
+  const primaryAudio = audioAssets[0];
   const audioMeta = {
-    fileName: audioFile?.name ?? 'No audio selected',
-    fileSize: audioFile ? formatFileSize(audioFile.size) : '0 KB',
-    detectedType: audioFile?.type || 'audio',
+    fileName: primaryAudio?.file.name ?? 'No audio selected',
+    fileSize: primaryAudio ? formatFileSize(primaryAudio.file.size) : '0 KB',
+    detectedType: primaryAudio?.file.type || 'audio',
   };
   const libraryItems: MediaLibraryItem[] = [
-    ...(audioFile ? [{ id: 'current-audio', file: audioFile, kind: 'audio' as const, duration: audioDuration }] : []),
+    ...audioAssets.map((asset) => ({ id: asset.id, file: asset.file, kind: 'audio' as const, duration: asset.duration })),
     ...assets.map((asset) => ({ id: asset.id, file: asset.file, kind: asset.kind, duration: asset.duration })),
   ];
   const normalizedAssetSearch = assetSearch.trim().toLocaleLowerCase();
@@ -275,15 +308,28 @@ function App() {
     wasExportingRef.current = isExporting;
   }, [isExporting]);
   useEffect(() => {
-    const audio = audioRef.current;
-    if (!audio || !audioUrl) return;
-    audio.volume = previewVolume;
-    if (isPlaying) void audio.play().catch(() => {
-      setIsPlaying(false);
-      setStatusMessage('Playback was blocked by the browser. Press play to try again.');
-    });
-    else audio.pause();
-  }, [audioUrl, isPlaying, previewVolume]);
+    playbackTimeRef.current = currentTime;
+  }, [currentTime]);
+  useEffect(() => {
+    if (!isPlaying) return;
+    let frame = 0;
+    let previous = performance.now();
+    const tick = (now: number) => {
+      const next = playbackTimeRef.current + Math.max(0, now - previous) / 1000;
+      previous = now;
+      if (next >= sequenceDuration) {
+        playbackTimeRef.current = sequenceDuration;
+        setCurrentTime(sequenceDuration);
+        setIsPlaying(false);
+        return;
+      }
+      playbackTimeRef.current = next;
+      setCurrentTime(next);
+      frame = window.requestAnimationFrame(tick);
+    };
+    frame = window.requestAnimationFrame(tick);
+    return () => window.cancelAnimationFrame(frame);
+  }, [isPlaying, sequenceDuration]);
   const revokeUrl = (url: string) => {
     urlsRef.current.revoke(url);
   };
@@ -297,14 +343,16 @@ function App() {
     name: name.trim() || 'Untitled project',
     createdAt,
     updatedAt: new Date().toISOString(),
-    schemaVersion: 5,
-    audio: audioFile ? {
-      id: `${id}-audio`,
-      fileName: audioFile.name,
-      mimeType: audioFile.type,
-      size: audioFile.size,
-      duration: audioDuration,
-    } : null,
+    schemaVersion: 6,
+    audioAssets: audioAssets.map((asset) => ({
+      id: asset.id,
+      fileName: asset.file.name,
+      mimeType: asset.file.type,
+      size: asset.file.size,
+      duration: asset.duration,
+    })),
+    audioTracks,
+    audioClips,
     assets: assets.map((asset) => ({
       id: asset.id,
       fileName: asset.file.name,
@@ -327,7 +375,7 @@ function App() {
   });
 
   const makeProjectMedia = () => ({
-    audio: audioFile,
+    audioAssets: Object.fromEntries(audioAssets.map((asset) => [asset.id, asset.file])),
     assets: Object.fromEntries(assets.map((asset) => [asset.id, asset.file])),
   });
 
@@ -370,34 +418,48 @@ function App() {
         return { id: asset.id, file, url, kind: asset.kind, duration: asset.duration };
       }));
 
-      const audioFileToRestore = stored.document.audio && stored.media.audio
-        ? new File([stored.media.audio], stored.document.audio.fileName, { type: stored.document.audio.mimeType })
-        : null;
-      const restoredAudioUrl = audioFileToRestore ? urlsRef.current.create(audioFileToRestore) : null;
-      if (restoredAudioUrl) createdUrls.push(restoredAudioUrl);
+      const restoredAudioAssets = await Promise.all(stored.document.audioAssets.map(async (asset): Promise<AudioAsset> => {
+        const blob = stored.media.audioAssets[asset.id];
+        const file = new File([blob], asset.fileName, { type: asset.mimeType });
+        const url = urlsRef.current.create(file);
+        createdUrls.push(url);
+        if (!mediaAlreadyDecoded) {
+          const audio = new Audio();
+          audio.preload = 'metadata';
+          try {
+            await waitForAudioMetadata(audio, url);
+          } catch (error) {
+            const reason = error instanceof Error ? ` ${error.message}` : '';
+            throw new Error(`Could not read "${asset.fileName}".${reason} Re-import the original media file.`);
+          }
+        }
+        return { id: asset.id, file, url, duration: asset.duration };
+      }));
 
-      audioRef.current?.pause();
-      audioRef.current?.removeAttribute('src');
-      audioRef.current?.load();
       urlsRef.current.replace(createdUrls);
 
       const documentValue = stored.document;
-      const restoredAudioDuration = documentValue.audio?.duration ?? 0;
-      const restoredClips = updateMatchedStillDurations(documentValue.clips, restoredAudioDuration);
+      const restoredAudioDuration = getAudioTimelineDuration(documentValue.audioClips);
+      const restoredClips = updateMatchedStillDurations(
+        documentValue.clips,
+        restoredAudioDuration,
+        getTimelineDuration(documentValue.clips),
+      );
       setProjectId(documentValue.id);
       setProjectName(documentValue.name);
       setProjectCreatedAt(documentValue.createdAt);
-      setAudioFile(audioFileToRestore);
-      setAudioUrl(restoredAudioUrl);
-      setAudioDuration(restoredAudioDuration);
+      setAudioAssets(restoredAudioAssets);
+      setAudioTracks(documentValue.audioTracks);
+      setAudioClips(documentValue.audioClips);
       setAssets(restoredAssets);
       setTracks(documentValue.tracks);
       setClips(restoredClips);
       setTitles(documentValue.titleOverlays);
       setMarkers(documentValue.markers);
       setSelectedClipId(restoredClips[0]?.id ?? '');
+      setSelectedAudioClipId(documentValue.audioClips[0]?.id ?? '');
       setSelectedTitleId(documentValue.titleOverlays[0]?.id ?? '');
-      setStep(documentValue.audio ? (documentValue.clips.length ? 3 : 2) : 1);
+      setStep(documentValue.audioAssets.length ? (documentValue.clips.length ? 3 : 2) : 1);
       setCurrentTime(0);
       setIsPlaying(false);
       setPresetId(documentValue.outputSettings.presetId);
@@ -408,8 +470,9 @@ function App() {
       setExportComplete(false);
       if (fileInputRef.current) fileInputRef.current.value = '';
       resetEditHistory({
-        audioFile: audioFileToRestore,
-        audioDuration: restoredAudioDuration,
+        audioAssets: restoredAudioAssets.map(({ id, file, duration }) => ({ id, file, duration })),
+        audioTracks: documentValue.audioTracks,
+        audioClips: documentValue.audioClips,
         assets: restoredAssets.map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
         tracks: documentValue.tracks,
         clips: restoredClips,
@@ -461,7 +524,7 @@ function App() {
   }, []);
 
   useEffect(() => {
-    const hasProjectContent = Boolean(audioFile || assets.length || clips.length || titles.length || markers.length);
+    const hasProjectContent = Boolean(audioAssets.length || assets.length || clips.length || titles.length || markers.length);
     const isExistingSavedProject = projectListRef.current.some((project) => project.id === projectId);
     if (!isProjectStorageReady || (!hasProjectContent && !isExistingSavedProject)) return;
     const snapshot = makeProjectDocument();
@@ -477,7 +540,7 @@ function App() {
     }, 850);
     return () => window.clearTimeout(timer);
   }, [
-    isProjectStorageReady, projectId, projectName, projectCreatedAt, audioFile, audioDuration,
+    isProjectStorageReady, projectId, projectName, projectCreatedAt, audioAssets, audioTracks, audioClips, audioDuration,
     assets, tracks, clips, titles, markers, presetId, customWidth, customHeight, frameRate, format,
   ]);
 
@@ -492,63 +555,110 @@ function App() {
     }
   };
 
-  const handleAudioSelect = async (file: File) => {
-    const validation = validateMediaImport(file, 'audio');
-    if (!validation.valid) {
-      setStatusMessage(validation.message);
-      return;
+  const handleAudioSelect = async (files: File[]) => {
+    const addedAssets: AudioAsset[] = [];
+    const addedTracks: AudioTrack[] = [];
+    const addedClips: AudioClip[] = [];
+    const rejected: string[] = [];
+    let projectMediaBytes = getProjectMediaBytes(audioAssets.map((asset) => asset.file), assets);
+
+    for (const file of files) {
+      const validation = validateMediaImport(file, 'audio');
+      if (!validation.valid) {
+        rejected.push(validation.message);
+        continue;
+      }
+      const mediaLimitError = validateApprovedMediaFile(file, projectMediaBytes, 'audio');
+      if (mediaLimitError) {
+        rejected.push(mediaLimitError);
+        continue;
+      }
+      let duration: number;
+      try {
+        duration = await readAudioDuration(file);
+      } catch (error) {
+        const reason = error instanceof Error ? ` ${error.message}` : '';
+        rejected.push(`Could not read "${file.name}".${reason}`);
+        continue;
+      }
+      if (duration <= 0) {
+        rejected.push(`Could not read the duration of "${file.name}". This browser may not be able to decode this file.`);
+        continue;
+      }
+
+      const id = newId();
+      const url = urlsRef.current.create(file);
+      const track: AudioTrack = {
+        id: newId(),
+        name: `Audio ${audioTracks.length + addedTracks.length + 1}`,
+        order: audioTracks.length + addedTracks.length,
+        visible: true,
+        locked: false,
+      };
+      addedAssets.push({ id, file, url, duration });
+      addedTracks.push(track);
+      addedClips.push({
+        id: newId(),
+        assetId: id,
+        trackId: track.id,
+        timelinePosition: 0,
+        start: 0,
+        end: duration,
+        volume: 1,
+      });
+      projectMediaBytes += file.size;
     }
-    const mediaLimitError = validateApprovedMediaFile(
-      file,
-      getProjectMediaBytes(null, assets),
-      'audio',
-    );
-    if (mediaLimitError) {
-      setStatusMessage(mediaLimitError);
-      return;
+
+    if (addedAssets.length) {
+      const nextAssets = [...audioAssets, ...addedAssets];
+      const nextTracks = [...audioTracks, ...addedTracks];
+      const nextAudioClips = [...audioClips, ...addedClips];
+      const nextStillClips = updateMatchedStillDurations(
+        clips,
+        getAudioTimelineDuration(nextAudioClips),
+        getTimelineDuration(clips),
+      );
+      setAudioAssets(nextAssets);
+      setAudioTracks(nextTracks);
+      setAudioClips(nextAudioClips);
+      setClips(nextStillClips);
+      setSelectedAudioClipId(addedClips[0].id);
+      recordEdit(makeEditSnapshot({
+        audioAssets: nextAssets.map(({ id: assetId, file: audioSource, duration: audioSourceDuration }) => ({
+          id: assetId,
+          file: audioSource,
+          duration: audioSourceDuration,
+        })),
+        audioTracks: nextTracks,
+        audioClips: nextAudioClips,
+        clips: nextStillClips,
+      }));
+      setStatusMessage(`Added ${addedAssets.length} audio file${addedAssets.length === 1 ? '' : 's'} as timeline track${addedAssets.length === 1 ? '' : 's'}.${rejected.length ? ` ${rejected.join(' ')}` : ''}`);
+    } else {
+      setStatusMessage(rejected.join(' ') || 'Choose a supported, decodable audio file.');
     }
-    let duration: number;
-    try {
-      duration = await readAudioDuration(file);
-    } catch (error) {
-      const reason = error instanceof Error ? ` ${error.message}` : '';
-      setStatusMessage(`Could not read the duration of "${file.name}".${reason} Your existing soundtrack was kept.`);
-      return;
-    }
-    if (duration <= 0) {
-      setStatusMessage(`Could not read the duration of "${file.name}". This browser may not be able to decode this file. Your existing soundtrack was kept.`);
-      return;
-    }
-    if (audioUrl) {
-      audioRef.current?.pause();
-      audioRef.current?.removeAttribute('src');
-      audioRef.current?.load();
-      revokeUrl(audioUrl);
-    }
-    const url = urlsRef.current.create(file);
-    const nextClips = updateMatchedStillDurations(clips, duration);
-    setAudioFile(file);
-    setAudioUrl(url);
-    setAudioDuration(duration);
-    setClips(nextClips);
-    recordEdit(makeEditSnapshot({ audioFile: file, audioDuration: duration, clips: nextClips }));
-    setCurrentTime(0);
-    setStatusMessage(`Loaded ${file.name}`);
   };
 
-  const removeAudio = () => {
-    if (!audioFile) return;
-    audioRef.current?.pause();
-    audioRef.current?.removeAttribute('src');
-    audioRef.current?.load();
-    if (audioUrl) revokeUrl(audioUrl);
-    setAudioFile(null);
-    setAudioUrl(null);
-    setAudioDuration(0);
-    setCurrentTime(0);
-    setIsPlaying(false);
-    recordEdit(makeEditSnapshot({ audioFile: null, audioDuration: 0 }));
-    setStatusMessage('Soundtrack removed from this project. The original source file on your device was not deleted.');
+  const removeAudio = (assetId: string) => {
+    const asset = audioAssets.find((item) => item.id === assetId);
+    if (!asset) return;
+    const nextAudioAssets = audioAssets.filter((item) => item.id !== assetId);
+    const nextAudioClips = audioClips.filter((clip) => clip.assetId !== assetId);
+    const usedTrackIds = new Set(nextAudioClips.map((clip) => clip.trackId));
+    const nextAudioTracks = audioTracks.filter((track) => usedTrackIds.has(track.id));
+    setAudioAssets(nextAudioAssets);
+    setAudioClips(nextAudioClips);
+    setAudioTracks(nextAudioTracks);
+    if (selectedAudioClipId && !nextAudioClips.some((clip) => clip.id === selectedAudioClipId)) {
+      setSelectedAudioClipId(nextAudioClips[0]?.id ?? '');
+    }
+    revokeUrl(asset.url);
+    recordEdit(makeEditSnapshot({
+      audioAssets: nextAudioAssets.map(({ id: assetId, file, duration }) => ({ id: assetId, file, duration })),
+      audioTracks: nextAudioTracks,
+      audioClips: nextAudioClips,
+    }));
+    setStatusMessage(`Removed "${asset.file.name}" and its audio clips from this project. The original source file was not deleted.`);
   };
 
   const handleAddVisuals = async (fileList: FileList | null) => {
@@ -563,7 +673,7 @@ function App() {
     setIsImportingVisuals(true);
     const rejected: string[] = [];
     try {
-      let projectMediaBytes = getProjectMediaBytes(audioFile, assets);
+      let projectMediaBytes = getProjectMediaBytes(audioAssets.map((asset) => asset.file), assets);
       const eligibleFiles = files.filter((file) => {
         const validation = validateMediaImport(file, 'visual');
         if (!validation.valid) rejected.push(validation.message);
@@ -625,13 +735,19 @@ function App() {
         appendAt += getClipDuration(clip);
         return clip;
       });
+      const allAssets = [...assets, ...validAssets];
+      const allClips = updateMatchedStillDurations(
+        [...clips, ...newClips],
+        audioDuration,
+        getVideoTimelineDuration([...clips, ...newClips], allAssets, tracks),
+      );
       setAssets((current) => [...current, ...validAssets]);
-      setClips((current) => [...current, ...newClips]);
+      setClips(allClips);
       if (newClips.length) {
         recordEdit(makeEditSnapshot({
-          assets: [...assets, ...validAssets].map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
+          assets: allAssets.map(({ id, file, kind, duration }) => ({ id, file, kind, duration })),
           tracks,
-          clips: [...clips, ...newClips],
+          clips: allClips,
         }));
       }
       if (newClips.length) setSelectedClipId(newClips[0].id);
@@ -665,12 +781,27 @@ function App() {
       );
     }
     let updated = { ...target, ...normalizedPatch };
+    const videoDuration = getVideoTimelineDuration(clips, assets, tracks);
     if (isStill && patch.stillDurationMode === 'match-audio' && audioDuration <= 0) return;
-    if (isStill && (
+    if (isStill && patch.stillDurationMode === 'match-video' && videoDuration <= 0) return;
+    if (isStill && patch.stillDurationMode === 'custom') {
+      const longestTimelineDuration = Math.max(audioDuration, videoDuration);
+      updated = {
+        ...updated,
+        stillDuration: normalizeStillDuration(longestTimelineDuration > 0
+          ? longestTimelineDuration - updated.timelinePosition
+          : target.stillDuration, updated.timelinePosition),
+      };
+    } else if (isStill && (
       patch.stillDurationMode === 'match-audio'
       || (typeof patch.timelinePosition === 'number' && updated.stillDurationMode === 'match-audio')
     )) {
-      updated = setStillDurationMode(updated, 'match-audio', audioDuration);
+      updated = setStillDurationMode(updated, 'match-audio', audioDuration, videoDuration);
+    } else if (isStill && (
+      patch.stillDurationMode === 'match-video'
+      || (typeof patch.timelinePosition === 'number' && updated.stillDurationMode === 'match-video')
+    )) {
+      updated = setStillDurationMode(updated, 'match-video', audioDuration, videoDuration);
     }
     if (isStill && (typeof patch.stillDuration === 'number' || typeof patch.timelinePosition === 'number')) {
       updated = {
@@ -678,12 +809,16 @@ function App() {
         stillDuration: normalizeStillDuration(updated.stillDuration, updated.timelinePosition),
       };
     }
-    const nextClips = clips.map((clip) => clip.id === id ? updated : clip);
+    const nextClips = updateMatchedStillDurations(
+      clips.map((clip) => clip.id === id ? updated : clip),
+      audioDuration,
+      getVideoTimelineDuration(clips.map((clip) => clip.id === id ? updated : clip), assets, tracks),
+    );
     if (nextClips.every((clip, index) => clip === clips[index])) return;
     setClips(nextClips);
     recordEdit(makeEditSnapshot({ clips: nextClips }));
   };
-  const updateTransform = (id: string, patch: Partial<VisualTransform>) => {
+  const updateTransform = (id: string, patch: Partial<VisualTransform>, coalescingKey?: string) => {
     const target = clips.find((clip) => clip.id === id);
     if (!target || tracks.find((track) => track.id === target.trackId)?.locked) return;
     const nextClips = clips.map((clip) => clip.id === id
@@ -691,10 +826,15 @@ function App() {
       : clip);
     if (nextClips.every((clip, index) => clip === clips[index])) return;
     setClips(nextClips);
-    recordEdit(makeEditSnapshot({ clips: nextClips }));
+    recordEdit(makeEditSnapshot({ clips: nextClips }), coalescingKey);
   };
   const removeClip = (id: string) => {
-    const nextClips = clips.filter((clip) => clip.id !== id);
+    const remainingClips = clips.filter((clip) => clip.id !== id);
+    const nextClips = updateMatchedStillDurations(
+      remainingClips,
+      audioDuration,
+      getVideoTimelineDuration(remainingClips, assets, tracks),
+    );
     if (nextClips.length === clips.length) return;
     const removed = assets.find((asset) => asset.id === clips.find((clip) => clip.id === id)?.assetId);
     const nextAssets = removed && !nextClips.some((clip) => clip.assetId === removed.id)
@@ -718,7 +858,12 @@ function App() {
     const asset = assets.find((item) => item.id === assetId);
     if (!asset) return;
     const nextAssets = assets.filter((item) => item.id !== assetId);
-    const nextClips = clips.filter((clip) => clip.assetId !== assetId);
+    const remainingClips = clips.filter((clip) => clip.assetId !== assetId);
+    const nextClips = updateMatchedStillDurations(
+      remainingClips,
+      audioDuration,
+      getVideoTimelineDuration(remainingClips, nextAssets, tracks),
+    );
     setAssets(nextAssets);
     setClips(nextClips);
     if (selectedClipId && !nextClips.some((clip) => clip.id === selectedClipId)) {
@@ -753,11 +898,18 @@ function App() {
     );
     let updated = { ...clip, trackId, timelinePosition: position };
     if (isStill && clip.stillDurationMode === 'match-audio') {
-      updated = setStillDurationMode(updated, 'match-audio', audioDuration);
+      updated = setStillDurationMode(updated, 'match-audio', audioDuration, getVideoTimelineDuration(clips, assets, tracks));
+    } else if (isStill && clip.stillDurationMode === 'match-video') {
+      updated = setStillDurationMode(updated, 'match-video', audioDuration, getVideoTimelineDuration(clips, assets, tracks));
     } else if (isStill) {
       updated = { ...updated, stillDuration: normalizeStillDuration(updated.stillDuration, position) };
     }
-    const nextClips = clips.map((item) => item.id === id ? updated : item);
+    const movedClips = clips.map((item) => item.id === id ? updated : item);
+    const nextClips = updateMatchedStillDurations(
+      movedClips,
+      audioDuration,
+      getVideoTimelineDuration(movedClips, assets, tracks),
+    );
     if (nextClips.every((item, index) => item === clips[index])) return;
     setClips(nextClips);
     recordEdit(makeEditSnapshot({ clips: nextClips, tracks }));
@@ -766,7 +918,12 @@ function App() {
   const duplicateClip = (id: string) => {
     const source = clips.find((clip) => clip.id === id);
     if (!source || tracks.find((track) => track.id === source.trackId)?.locked) return;
-    const nextClips = duplicateTimelineClip(clips, id);
+    const duplicatedClips = duplicateTimelineClip(clips, id);
+    const nextClips = updateMatchedStillDurations(
+      duplicatedClips,
+      audioDuration,
+      getVideoTimelineDuration(duplicatedClips, assets, tracks),
+    );
     if (nextClips.length === clips.length) return;
     setClips(nextClips);
     recordEdit(makeEditSnapshot({ clips: nextClips, tracks }));
@@ -785,6 +942,156 @@ function App() {
     if (nextTracks.every((track, index) => track === tracks[index])) return;
     setTracks(nextTracks);
     recordEdit(makeEditSnapshot({ tracks: nextTracks, clips }));
+  };
+
+  const addAudioTrack = () => {
+    const order = Math.max(-1, ...audioTracks.map((track) => track.order)) + 1;
+    const track: AudioTrack = {
+      id: newId(),
+      name: `Audio ${audioTracks.length + 1}`,
+      order,
+      visible: true,
+      locked: false,
+    };
+    const nextTracks = [...audioTracks, track];
+    setAudioTracks(nextTracks);
+    recordEdit(makeEditSnapshot({ audioTracks: nextTracks }));
+  };
+
+  const duplicateAudioTrack = (id: string) => {
+    const source = audioTracks.find((track) => track.id === id);
+    if (!source) return;
+    const duplicateId = newId();
+    const order = Math.max(-1, ...audioTracks.map((track) => track.order)) + 1;
+    const duplicate: AudioTrack = {
+      ...source,
+      id: duplicateId,
+      name: `${source.name} copy`,
+      order,
+      locked: false,
+    };
+    const duplicatedClips = audioClips
+      .filter((clip) => clip.trackId === source.id)
+      .map((clip) => ({ ...clip, id: newId(), trackId: duplicateId }));
+    const nextTracks = [...audioTracks, duplicate];
+    const nextClips = [...audioClips, ...duplicatedClips];
+    setAudioTracks(nextTracks);
+    setAudioClips(nextClips);
+    setSelectedAudioClipId(duplicatedClips[0]?.id ?? '');
+    recordEdit(makeEditSnapshot({ audioTracks: nextTracks, audioClips: nextClips }));
+  };
+
+  const removeAudioTrack = (id: string) => {
+    const track = audioTracks.find((item) => item.id === id);
+    if (!track) return;
+    const nextTracks = audioTracks.filter((item) => item.id !== id);
+    const nextClips = audioClips.filter((clip) => clip.trackId !== id);
+    setAudioTracks(nextTracks);
+    setAudioClips(nextClips);
+    if (selectedAudioClipId && !nextClips.some((clip) => clip.id === selectedAudioClipId)) {
+      setSelectedAudioClipId(nextClips[0]?.id ?? '');
+    }
+    recordEdit(makeEditSnapshot({ audioTracks: nextTracks, audioClips: nextClips }));
+    setStatusMessage(`Removed "${track.name}" and its clips. Source audio files remain in the media library.`);
+  };
+
+  const addAudioClip = (assetId: string) => {
+    const asset = audioAssets.find((item) => item.id === assetId);
+    if (!asset || asset.duration <= 0) return;
+    let track = audioTracks.find((item) => item.id === audioClips.find((clip) => clip.id === selectedAudioClipId)?.trackId && !item.locked)
+      ?? audioTracks.find((item) => !item.locked);
+    let nextTracks = audioTracks;
+    if (!track) {
+      track = {
+        id: newId(),
+        name: `Audio ${audioTracks.length + 1}`,
+        order: Math.max(-1, ...audioTracks.map((item) => item.order)) + 1,
+        visible: true,
+        locked: false,
+      };
+      nextTracks = [...audioTracks, track];
+      setAudioTracks(nextTracks);
+    }
+    const clipEnd = Math.min(asset.duration, MAX_TIMELINE_DURATION);
+    const clip: AudioClip = {
+      id: newId(),
+      assetId,
+      trackId: track.id,
+      timelinePosition: Math.min(currentTime, Math.max(0, MAX_TIMELINE_DURATION - clipEnd)),
+      start: 0,
+      end: clipEnd,
+      volume: 1,
+    };
+    const nextClips = [...audioClips, clip];
+    setAudioClips(nextClips);
+    setSelectedAudioClipId(clip.id);
+    recordEdit(makeEditSnapshot({ audioTracks: nextTracks, audioClips: nextClips }));
+  };
+
+  const duplicateAudioClip = (id: string) => {
+    const source = audioClips.find((clip) => clip.id === id);
+    const track = audioTracks.find((item) => item.id === source?.trackId);
+    if (!source || track?.locked) return;
+    const clipDuration = getAudioClipDuration(source);
+    const duplicate = {
+      ...source,
+      id: newId(),
+      timelinePosition: Math.min(
+        MAX_TIMELINE_DURATION - clipDuration,
+        source.timelinePosition + clipDuration,
+      ),
+    };
+    const nextClips = [...audioClips, duplicate];
+    setAudioClips(nextClips);
+    setSelectedAudioClipId(duplicate.id);
+    recordEdit(makeEditSnapshot({ audioClips: nextClips }));
+  };
+
+  const removeAudioClip = (id: string) => {
+    const nextClips = audioClips.filter((clip) => clip.id !== id);
+    if (nextClips.length === audioClips.length) return;
+    setAudioClips(nextClips);
+    setSelectedAudioClipId(nextClips[0]?.id ?? '');
+    recordEdit(makeEditSnapshot({ audioClips: nextClips }));
+  };
+
+  const updateAudioClip = (id: string, patch: Partial<Pick<AudioClip, 'start' | 'end' | 'timelinePosition' | 'volume'>>) => {
+    const target = audioClips.find((clip) => clip.id === id);
+    const asset = audioAssets.find((item) => item.id === target?.assetId);
+    const track = audioTracks.find((item) => item.id === target?.trackId);
+    if (!target || !asset || asset.duration <= 0 || track?.locked) return;
+    const updated = { ...target, ...patch };
+    const minimumSourceDuration = Math.min(0.1, asset.duration);
+    updated.start = Math.max(0, Math.min(asset.duration - minimumSourceDuration, updated.start));
+    updated.end = Math.max(updated.start + minimumSourceDuration, Math.min(asset.duration, updated.end));
+    updated.timelinePosition = Math.max(0, Math.min(MAX_TIMELINE_DURATION - getAudioClipDuration(updated), updated.timelinePosition));
+    updated.volume = Math.max(0, Math.min(2, updated.volume));
+    const nextClips = audioClips.map((clip) => clip.id === id ? updated : clip);
+    setAudioClips(nextClips);
+    recordEdit(makeEditSnapshot({ audioClips: nextClips }));
+  };
+
+  const updateAudioTrack = (id: string, patch: Partial<Pick<AudioTrack, 'name' | 'visible' | 'locked'>>) => {
+    const nextTracks = audioTracks.map((track) => track.id === id ? { ...track, ...patch } : track);
+    if (nextTracks.every((track, index) => track === audioTracks[index])) return;
+    setAudioTracks(nextTracks);
+    recordEdit(makeEditSnapshot({ audioTracks: nextTracks }));
+  };
+
+  const moveAudioClip = (clipId: string, trackId: string, timelinePosition: number) => {
+    const clip = audioClips.find((item) => item.id === clipId);
+    const targetTrack = audioTracks.find((track) => track.id === trackId);
+    const sourceTrack = audioTracks.find((track) => track.id === clip?.trackId);
+    if (!clip || !targetTrack || targetTrack.locked || sourceTrack?.locked) return;
+    const maximumPosition = Math.max(0, MAX_TIMELINE_DURATION - getAudioClipDuration(clip));
+    const updated = {
+      ...clip,
+      trackId,
+      timelinePosition: Math.min(maximumPosition, Math.max(0, snapTimelinePosition(timelinePosition, snapTimelineEnabled))),
+    };
+    const nextClips = audioClips.map((item) => item.id === clipId ? updated : item);
+    setAudioClips(nextClips);
+    recordEdit(makeEditSnapshot({ audioClips: nextClips }));
   };
 
   const updateOutputSettings = (patch: Partial<EditSnapshot['outputSettings']>) => {
@@ -820,7 +1127,7 @@ function App() {
     recordEdit(makeEditSnapshot({ titles: nextTitles }));
   };
 
-  const updateTitle = (id: string, patch: Partial<TitleOverlay>) => {
+  const updateTitle = (id: string, patch: Partial<TitleOverlay>, coalescingKey?: string) => {
     const nextTitles = titles.map((title) => {
       if (title.id !== id) return title;
       const updated = { ...title, ...patch };
@@ -833,7 +1140,7 @@ function App() {
     });
     if (nextTitles.every((title, index) => title === titles[index])) return;
     setTitles(nextTitles);
-    recordEdit(makeEditSnapshot({ titles: nextTitles }));
+    recordEdit(makeEditSnapshot({ titles: nextTitles }), coalescingKey);
   };
 
   const removeTitle = (id: string) => {
@@ -913,23 +1220,21 @@ function App() {
   }, [isProjectMenuOpen]);
 
   const resetProjectState = () => {
-    audioRef.current?.pause();
-    audioRef.current?.removeAttribute('src');
-    audioRef.current?.load();
     urlsRef.current.clear();
     setProjectId(newId());
     setProjectName('Untitled project');
     setProjectCreatedAt(new Date().toISOString());
     setStep(1);
-    setAudioFile(null);
-    setAudioUrl(null);
-    setAudioDuration(0);
+    setAudioAssets([]);
+    setAudioTracks([]);
+    setAudioClips([]);
     setAssets([]);
     setTracks([defaultVideoTrack()]);
     setClips([]);
     setTitles([]);
     setMarkers([]);
     setSelectedClipId('');
+    setSelectedAudioClipId('');
     setSelectedTitleId('');
     setCurrentTime(0);
     setIsPlaying(false);
@@ -939,8 +1244,9 @@ function App() {
     setFrameRate(30);
     setFormat('MP4');
     resetEditHistory({
-      audioFile: null,
-      audioDuration: 0,
+      audioAssets: [],
+      audioTracks: [],
+      audioClips: [],
       assets: [],
       tracks: [defaultVideoTrack()],
       clips: [],
@@ -955,7 +1261,7 @@ function App() {
   };
 
   const startNewVideo = async () => {
-    const hasUnsavedChanges = Boolean(audioFile || assets.length || clips.length || titles.length || markers.length);
+    const hasUnsavedChanges = Boolean(audioAssets.length || assets.length || clips.length || titles.length || markers.length);
     if (hasUnsavedChanges && !window.confirm('Create a new project? The current project will be saved in this browser before starting fresh.')) {
       return;
     }
@@ -1001,7 +1307,7 @@ function App() {
   const handleOpenProject = async () => {
     if (!projectToOpen) return;
     try {
-      if (audioFile || assets.length || clips.length) await saveCurrentProject();
+      if (audioAssets.length || assets.length || clips.length) await saveCurrentProject();
       const stored = await projectStorage.loadProject(projectToOpen);
       await applyStoredProject(stored);
       setProjectStorageStatus(`Opened “${stored.document.name}”.`);
@@ -1027,8 +1333,8 @@ function App() {
   const verifyPackageMediaDecodes = async (stored: StoredProject) => {
     const temporaryUrls: string[] = [];
     try {
-      if (stored.document.audio && stored.media.audio) {
-        const file = new File([stored.media.audio], stored.document.audio.fileName, { type: stored.document.audio.mimeType });
+      for (const asset of stored.document.audioAssets) {
+        const file = new File([stored.media.audioAssets[asset.id]], asset.fileName, { type: asset.mimeType });
         const url = urlsRef.current.create(file);
         temporaryUrls.push(url);
         const audio = document.createElement('audio');
@@ -1103,7 +1409,7 @@ function App() {
       setProjectStorageStatus('Checking that imported media can be decoded…');
       await verifyPackageMediaDecodes(imported);
       const hasActiveWork = Boolean(
-        audioFile || assets.length || clips.length || titles.length || markers.length
+        audioAssets.length || assets.length || clips.length || titles.length || markers.length
         || projectName !== 'Untitled project' || presetId !== 'youtube'
         || customWidth !== 1920 || customHeight !== 1080 || frameRate !== 30 || format !== 'MP4',
       );
@@ -1148,11 +1454,14 @@ function App() {
   };
 
   const handleExport = async () => {
-    if (!audioFile || clips.length === 0) {
-      setStatusMessage('Add a soundtrack and at least one visual clip before exporting.');
+    if (isExporting || exportAbortControllerRef.current) return;
+    setExportComplete(false);
+    if (!clips.length) {
+      setStatusMessage('Add at least one visual clip before exporting.');
       return;
     }
-    const durationLimitError = validateApprovedExportDuration(audioDuration);
+    const renderDuration = sequenceDuration;
+    const durationLimitError = validateApprovedExportDuration(renderDuration);
     if (durationLimitError) {
       setStatusMessage(durationLimitError);
       return;
@@ -1171,31 +1480,38 @@ function App() {
     setStatusMessage('Preparing your video…');
     try {
       const blob = await renderVideo({
-        audioFile,
+        audioAssets,
+        audioTracks,
+        audioClips,
         assets,
         tracks,
         clips,
         titles,
+        duration: renderDuration,
         width,
         height,
         frameRate,
         mimeType,
         signal: abortController.signal,
-        onStatus: setStatusMessage,
+        onStatus: (message) => {
+          if (!abortController.signal.aborted) setStatusMessage(message);
+        },
         onProgress: (progress) => {
+          if (abortController.signal.aborted) return;
           setExportProgress(progress);
-          setStatusMessage(`Creating your video · ${Math.round(progress)}%`);
+          setStatusMessage(`Rendering your video · ${Math.round(progress)}%`);
         },
       });
+      if (abortController.signal.aborted) throw new DOMException('Render canceled.', 'AbortError');
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.download = buildOutputFileName(audioFile.name, format.toLowerCase());
+      link.download = buildOutputFileName(audioFile?.name ?? projectName, format.toLowerCase());
       link.click();
       window.setTimeout(() => URL.revokeObjectURL(url), 1000);
       setExportProgress(100);
       setExportComplete(true);
-      setStatusMessage('Export complete. Your video is downloading.');
+      setStatusMessage('Render complete. Video download requested. You can keep editing and render again.');
     } catch (error) {
       setExportComplete(false);
       setStatusMessage(abortController.signal.aborted
@@ -1207,12 +1523,13 @@ function App() {
     }
   };
 
-  const canContinue = step === 1 ? Boolean(audioFile && audioDuration > 0) : clips.length > 0;
-  const stepsComplete = [Boolean(audioFile), clips.length > 0, false];
+  const canContinue = step === 1 ? Boolean(audioAssets.length && audioDuration > 0) : clips.length > 0;
+  const stepsComplete = [Boolean(audioAssets.length), clips.length > 0, false];
   const playPause = () => {
-    if (currentTime >= audioDuration) {
-      if (audioRef.current) audioRef.current.currentTime = 0;
+    if (currentTime >= sequenceDuration) {
+      playbackTimeRef.current = 0;
       setCurrentTime(0);
+      setPreviewSeekRevision((revision) => revision + 1);
     }
     setIsPlaying((playing) => !playing);
   };
@@ -1250,7 +1567,7 @@ function App() {
       label: 'FILE',
       items: [
         { label: 'Import project', icon: '⇩', onClick: () => projectPackageInputRef.current?.click(), disabled: isExporting || isImportingVisuals || isProjectPackageBusy || !isProjectStorageReady },
-        { label: 'Export project', icon: '⇪', onClick: () => void handleExportProjectFile(), disabled: isExporting || isImportingVisuals || isProjectPackageBusy },
+        { label: 'Export project file', icon: '⇪', onClick: () => void handleExportProjectFile(), disabled: isExporting || isImportingVisuals || isProjectPackageBusy },
       ],
     },
   ];
@@ -1291,16 +1608,27 @@ function App() {
               <div className="min-w-0 flex-1">
                 <p className="truncate text-sm font-medium" title={item.file.name}>{item.file.name || 'Unnamed media file'}</p>
                 <p className="mt-1 break-all text-[11px] text-neutral-500">
-                  {item.kind === 'audio' ? 'Soundtrack' : item.kind === 'image' ? 'Image' : 'Video'}
+                  {item.kind === 'audio' ? 'Audio' : item.kind === 'image' ? 'Image' : 'Video'}
                   {' · '}{getMediaTypeLabel(item.file)}{' · '}{formatFileSize(item.file.size)}
                   {item.kind === 'image'
                     ? ' · source duration N/A (still image)'
                     : item.duration > 0 ? ` · ${formatDuration(item.duration)}` : ''}
                 </p>
               </div>
+              {item.kind === 'audio' && (
+                <button
+                  type="button"
+                  onClick={() => addAudioClip(item.id)}
+                  disabled={isExporting || isImportingVisuals || isProjectPackageBusy}
+                  aria-label={`Add ${item.file.name} to the audio timeline`}
+                  className="shrink-0 border border-sky-300 bg-sky-50 px-3 py-2 text-xs font-semibold text-sky-950 hover:bg-sky-100 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  Add to timeline
+                </button>
+              )}
               <button
                 type="button"
-                onClick={() => item.kind === 'audio' ? removeAudio() : removeVisualAsset(item.id)}
+                onClick={() => item.kind === 'audio' ? removeAudio(item.id) : removeVisualAsset(item.id)}
                 disabled={isExporting || isImportingVisuals || isProjectPackageBusy}
                 aria-label={`Remove ${item.kind === 'audio' ? 'soundtrack' : 'visual asset'} ${item.file.name} from project`}
                 className="shrink-0 border border-neutral-200 px-3 py-2 text-xs font-medium text-neutral-700 hover:border-red-300 hover:text-red-800 disabled:cursor-not-allowed disabled:opacity-40"
@@ -1355,6 +1683,14 @@ function App() {
                   {projectList.map((project) => <option key={project.id} value={project.id}>{project.name}{project.problem ? ' · needs attention' : ''}</option>)}
                 </select>
               </label>
+              <button
+                type="button"
+                onClick={() => void handleOpenProject()}
+                disabled={!projectToOpen || isExporting || isImportingVisuals || isProjectPackageBusy}
+                className="self-end border border-neutral-200 bg-white px-3 py-2.5 text-xs font-semibold text-neutral-700 hover:bg-neutral-50 disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                Open selected
+              </button>
               <span className="inline-flex items-center rounded-full border border-neutral-200 bg-neutral-50 px-2.5 py-1 text-[11px] font-medium text-neutral-600">
                 {projectStatusLabel}
               </span>
@@ -1439,19 +1775,20 @@ function App() {
               </button>;
             })}
           </nav>
+          <p className="w-full text-xs font-medium text-neutral-500 sm:hidden">Step {step} of 3 · {steps[step - 1]}</p>
         </div>
 
         {step === 1 && <section className="mx-auto max-w-2xl border-t border-neutral-200 py-8">
           <div className="mb-8">
-            <h2 className="text-xl font-semibold">Choose your soundtrack</h2>
-            <p className="mt-2 text-sm text-neutral-500">Add one audio track. It sets the finished video's duration.</p>
+            <h2 className="text-xl font-semibold">Add audio tracks</h2>
+            <p className="mt-2 text-sm text-neutral-500">Add one or more soundtrack, music, or voice tracks. You can arrange and mix them independently in the editor.</p>
           </div>
-          <AudioUploader onFileSelect={handleAudioSelect} fileName={audioMeta.fileName} fileSize={audioMeta.fileSize} detectedType={audioMeta.detectedType} duration={audioDuration} />
+          <AudioUploader onFilesSelect={(files) => void handleAudioSelect(files)} fileName={audioMeta.fileName} fileSize={audioMeta.fileSize} detectedType={audioMeta.detectedType} duration={primaryAudio?.duration ?? 0} />
           <p className="mt-2 text-xs text-neutral-500">A listed filename extension does not guarantee that this browser can decode the file.</p>
-          {audioFile && <div className="mt-5 flex items-center justify-between border-b border-neutral-200 py-4 text-sm">
-            <div className="min-w-0"><p className="truncate font-medium">{audioFile.name}</p><p className="mt-1 text-xs text-neutral-500">{formatDuration(audioDuration)} · {audioMeta.fileSize}</p></div>
-            <button type="button" className="text-xs font-medium text-moss underline underline-offset-4" onClick={() => document.getElementById('audio-upload')?.click()}>Replace audio</button>
-          </div>}
+          {audioAssets.map((asset) => <div key={asset.id} className="mt-3 flex items-center justify-between gap-3 border-b border-neutral-200 py-3 text-sm">
+            <div className="min-w-0"><p className="truncate font-medium">{asset.file.name}</p><p className="mt-1 text-xs text-neutral-500">{formatDuration(asset.duration)} · {formatFileSize(asset.file.size)} · {audioClips.filter((clip) => clip.assetId === asset.id).length} clip{audioClips.filter((clip) => clip.assetId === asset.id).length === 1 ? '' : 's'}</p></div>
+            <button type="button" className="shrink-0 text-xs font-medium text-red-800 underline underline-offset-4" onClick={() => removeAudio(asset.id)}>Remove</button>
+          </div>)}
           {statusMessage && <p className="mt-4 text-sm text-neutral-600" role="status">{statusMessage}</p>}
           <div className="mt-8 flex justify-end"><button type="button" onClick={() => setStep(2)} disabled={!canContinue} className="bg-moss px-5 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">Continue to visuals <span aria-hidden="true">→</span></button></div>
         </section>}
@@ -1484,9 +1821,12 @@ function App() {
 
         {step === 3 && <section className="space-y-6 border-t border-neutral-200 pt-6">
           <div className="flex flex-wrap items-center justify-between gap-3">
-            <div><h2 className="text-xl font-semibold">Edit &amp; export</h2><p className="mt-1 text-sm text-neutral-500">{audioFile?.name} · {formatDuration(audioDuration)} soundtrack</p></div>
+            <div><h2 ref={editorHeadingRef} tabIndex={-1} className="text-xl font-semibold focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-moss">Edit &amp; export</h2><p className="mt-1 text-sm text-neutral-500">{audioTracks.length} audio track{audioTracks.length === 1 ? '' : 's'} · {formatDuration(sequenceDuration)} sequence</p></div>
             <div className="flex items-center gap-2 text-xs text-neutral-500"><span className="h-2 w-2 rounded-full bg-lime-500" />{projectStorageStatus.startsWith('Saved') ? 'Autosaved locally' : 'Local autosave enabled'}</div>
           </div>
+          <aside className="border border-neutral-200 bg-white px-4 py-3 text-sm text-neutral-700" aria-label="Quick start editing guide">
+            <span className="font-semibold">Quick start:</span> Select a clip in the timeline to adjust its timing and framing. Add titles in the Inspector, preview your sequence, then render your video.
+          </aside>
           <div className="grid min-w-0 grid-cols-1 items-start gap-5 lg:grid-cols-[minmax(0,3fr)_minmax(300px,2fr)]">
             <div ref={previewContainerRef} className="preview-workspace min-w-0">
               <div className="flex min-h-[260px] items-center justify-center rounded-lg border border-neutral-800 bg-[#101613] p-3 sm:min-h-[340px] sm:p-5 xl:min-h-[420px]">
@@ -1506,15 +1846,45 @@ function App() {
               </div>
               <div className="mt-3 flex flex-wrap items-center gap-3 rounded-lg border border-neutral-200 bg-white px-3 py-2.5">
                 <button type="button" onClick={playPause} className="grid h-9 w-9 shrink-0 place-items-center rounded-full bg-ink text-sm text-white transition hover:bg-moss" aria-label={isPlaying ? 'Pause preview' : 'Play preview'}>{isPlaying ? 'Ⅱ' : '▶'}</button>
-                <div className="min-w-[140px] flex-1">
-                  <input aria-label="Preview playback position" type="range" min="0" max={Math.max(audioDuration, 0.1)} step="0.1" value={clampTimelineTime(currentTime, audioDuration)} onChange={(event) => { const time = clampTimelineTime(Number(event.target.value), audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(time); if (audioRef.current) audioRef.current.currentTime = time; }} className="w-full accent-moss" />
-                  <div className="flex justify-between text-[10px] tabular-nums text-neutral-500"><span>{formatDuration(clampTimelineTime(currentTime, audioDuration))}</span><span>{formatDuration(audioDuration)}</span></div>
+                <div className="flex min-w-[180px] flex-1 items-center gap-2 text-[11px] tabular-nums text-neutral-500">
+                  <span className="shrink-0">{formatDuration(clampTimelineTime(currentTime, sequenceDuration))}</span>
+                  <input aria-label="Preview playback position" type="range" min="0" max={Math.max(sequenceDuration, 0.1)} step="0.1" value={clampTimelineTime(currentTime, sequenceDuration)} onChange={(event) => { const time = clampTimelineTime(Number(event.target.value), sequenceDuration); playbackTimeRef.current = time; setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(time); }} className="min-w-0 flex-1 accent-moss" />
+                  <span className="shrink-0">{formatDuration(sequenceDuration)}</span>
                 </div>
                 <label className="flex items-center gap-2 text-xs text-neutral-500" aria-label="Preview volume">
                   <span aria-hidden="true">◖</span>
                   <input aria-label="Preview volume" type="range" min="0" max="1" step="0.05" value={previewVolume} onChange={(event) => setPreviewVolume(Number(event.target.value))} className="w-20 accent-moss" />
                 </label>
                 <button type="button" onClick={() => void togglePreviewFullscreen()} className="grid h-9 w-9 place-items-center rounded-md text-neutral-500 transition hover:bg-neutral-100 hover:text-ink" aria-label="Toggle preview fullscreen" title="Toggle fullscreen">⛶</button>
+              </div>
+              <div className="mt-3 grid grid-cols-1 gap-2 rounded-lg border border-moss/30 bg-lime/20 p-3 sm:grid-cols-3">
+                <button
+                  type="button"
+                  disabled={!selectedClip || selectedTrack?.locked || currentTime <= (selectedClip?.timelinePosition ?? 0) || currentTime >= (selectedClip ? selectedClip.timelinePosition + getClipDuration(selectedClip) : 0)}
+                  onClick={() => selectedClip && handleSplit(selectedClip.id)}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-white px-3 py-2 text-sm font-semibold text-ink shadow-sm hover:bg-lime/50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-none stroke-current stroke-2"><circle cx="6" cy="6" r="2.5" /><circle cx="6" cy="18" r="2.5" /><path d="m8 7.5 12 12M8 16.5l5-5m3-3 4-4" /></svg>
+                  Split at playhead
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedClip || selectedTrack?.locked}
+                  onClick={() => selectedClip && duplicateClip(selectedClip.id)}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md bg-white px-3 py-2 text-sm font-semibold text-ink shadow-sm hover:bg-lime/50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-none stroke-current stroke-2"><rect x="8" y="8" width="12" height="12" rx="1" /><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3" /></svg>
+                  Duplicate clip
+                </button>
+                <button
+                  type="button"
+                  disabled={!selectedClip || selectedTrack?.locked}
+                  onClick={() => selectedClip && removeClip(selectedClip.id)}
+                  className="inline-flex min-h-11 items-center justify-center gap-2 rounded-md border border-red-200 bg-white px-3 py-2 text-sm font-semibold text-red-800 shadow-sm hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-40"
+                >
+                  <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-none stroke-current stroke-2"><path d="M4 7h16M9 7V4h6v3m3 0-1 13H7L6 7m4 4v5m4-5v5" /></svg>
+                  Remove clip
+                </button>
               </div>
             </div>
             <aside className="min-w-0 overflow-hidden rounded-lg border border-neutral-200 bg-white">
@@ -1524,6 +1894,12 @@ function App() {
               </div>
               <div className="divide-y divide-neutral-200 px-4">
                 <details open className="inspector-section py-3">
+                  <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">Title properties</summary>
+                  <div className="mt-3">
+                    <TitleOverlayEditor titles={titles} selectedTitleId={selectedTitleId} onAdd={addTitle} onSelect={setSelectedTitleId} onChange={updateTitle} onEndEditCoalescing={endEditCoalescing} onRemove={removeTitle} />
+                  </div>
+                </details>
+                <details className="inspector-section py-3">
                   <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">Platform &amp; placement</summary>
                   <label className="mt-2 block text-[11px] font-medium text-neutral-500">Aspect ratio and resolution
                     <select className="mt-1.5 w-full rounded-md border border-neutral-200 bg-white px-2.5 py-2 text-xs text-ink" value={presetId} onChange={(event) => updateOutputSettings({ presetId: event.target.value })}>
@@ -1535,21 +1911,26 @@ function App() {
                     <label className="text-[11px] font-medium text-neutral-500">Height<input className="mt-1 w-full rounded-md border border-neutral-200 px-2.5 py-2 text-xs font-normal text-ink" type="number" min="144" max="3840" step="2" value={customHeight} onChange={(event) => updateOutputSettings({ customHeight: Math.max(144, Number(event.target.value)) })} /></label>
                   </div>}
                 </details>
-                <details open className="inspector-section py-3">
+                <details className="inspector-section py-3">
                   <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">Export settings</summary>
                   <div className="mt-2 grid grid-cols-2 gap-2">
-                    <label className="text-[11px] font-medium text-neutral-500">File format<select className="mt-1.5 w-full rounded-md border border-neutral-200 bg-white px-2.5 py-2 text-xs font-normal text-ink" value={format} onChange={(event) => updateOutputSettings({ format: event.target.value })}><option>MP4</option><option>WebM</option></select></label>
+                    <label className="text-[11px] font-medium text-neutral-500">File format<select className="mt-1.5 w-full rounded-md border border-neutral-200 bg-white px-2.5 py-2 text-xs font-normal text-ink" value={format} onChange={(event) => updateOutputSettings({ format: event.target.value })}><option disabled={!availableExportFormats.includes('MP4')}>MP4{availableExportFormats.includes('MP4') ? '' : ' — unavailable in this browser'}</option><option disabled={!availableExportFormats.includes('WebM')}>WebM{availableExportFormats.includes('WebM') ? '' : ' — unavailable in this browser'}</option></select></label>
                     <label className="text-[11px] font-medium text-neutral-500">Frame rate<select className="mt-1.5 w-full rounded-md border border-neutral-200 bg-white px-2.5 py-2 text-xs font-normal text-ink" value={frameRate} onChange={(event) => updateOutputSettings({ frameRate: Number(event.target.value) })}><option value="24">24 FPS</option><option value="30">30 FPS</option><option value="60">60 FPS</option></select></label>
                   </div>
+                  <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">
+                    Browser-reported recording formats: {availableExportFormats.length ? availableExportFormats.join(', ') : 'none'}.
+                    {' '}Media decoding or rendering may still fail when you create the video.
+                  </p>
                 </details>
-                <details open className="inspector-section py-3">
+                <details className="inspector-section py-3">
                   <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">
                     <span>Canvas &amp; sequence</span>
-                    <span className="ml-auto mr-2 text-[10px] font-normal tabular-nums text-neutral-400">{width} × {height} · {formatDuration(Math.min(audioDuration, timelineDuration))}</span>
+                    <span className="ml-auto mr-2 text-[10px] font-normal tabular-nums text-neutral-400">{width} × {height} · {formatDuration(sequenceDuration)}</span>
                   </summary>
                   <dl className="mt-2 space-y-2 text-xs">
                     <div className="flex justify-between gap-3"><dt className="text-neutral-500">Canvas dimensions</dt><dd className="font-medium tabular-nums text-ink">{width} × {height}</dd></div>
-                    <div className="flex justify-between gap-3"><dt className="text-neutral-500">Sequence / soundtrack</dt><dd className="font-medium tabular-nums text-ink">{formatDuration(Math.min(audioDuration, timelineDuration))} / {formatDuration(audioDuration)}</dd></div>
+                    <div className="flex justify-between gap-3"><dt className="text-neutral-500">Sequence duration</dt><dd className="font-medium tabular-nums text-ink">{formatDuration(sequenceDuration)}</dd></div>
+                    <div className="flex justify-between gap-3"><dt className="text-neutral-500">Audio tracks</dt><dd className="font-medium tabular-nums text-ink">{audioTracks.length}</dd></div>
                   </dl>
                   <p className="mt-2 text-[10px] leading-relaxed text-neutral-500">Platform dimensions are starting presets. Check current platform requirements before publishing.</p>
                 </details>
@@ -1566,15 +1947,12 @@ function App() {
                       <input type="checkbox" checked={snapTimelineEnabled} onChange={(event) => setSnapTimelineEnabled(event.target.checked)} aria-label="Snap clip drag positions to 0.1-second increments" />
                     </label>
                     <div className="flex items-center justify-between gap-2 border-t border-neutral-100 pt-2">
-                      <span className="text-[11px] text-neutral-500">{tracks.length} video track{tracks.length === 1 ? '' : 's'}</span>
-                      <button type="button" onClick={addTrack} className="rounded-md border border-neutral-200 px-2.5 py-1.5 text-[11px] font-semibold text-neutral-700 transition hover:bg-neutral-50">+ Video track</button>
+                      <span className="text-[11px] text-neutral-500">{tracks.length} video · {audioTracks.length} audio tracks</span>
+                      <div className="flex gap-2">
+                        <button type="button" onClick={addTrack} className="rounded-md border border-neutral-200 px-2.5 py-1.5 text-[11px] font-semibold text-neutral-700 transition hover:bg-neutral-50">+ Video track</button>
+                        <button type="button" onClick={addAudioTrack} className="rounded-md border border-sky-200 bg-sky-50 px-2.5 py-1.5 text-[11px] font-semibold text-sky-950 transition hover:bg-sky-100">+ Audio track</button>
+                      </div>
                     </div>
-                  </div>
-                </details>
-                <details className="inspector-section py-3">
-                  <summary className="cursor-pointer list-none text-xs font-semibold text-neutral-700 marker:hidden">Title properties</summary>
-                  <div className="mt-3">
-                    <TitleOverlayEditor titles={titles} selectedTitleId={selectedTitleId} onAdd={addTitle} onSelect={setSelectedTitleId} onChange={updateTitle} onRemove={removeTitle} />
                   </div>
                 </details>
                 <details className="inspector-section py-3">
@@ -1593,41 +1971,102 @@ function App() {
               markers={markers}
               selectedTitleId={selectedTitleId}
               selectedClipId={selectedClipId}
+              selectedAudioClipId={selectedAudioClip?.id ?? ''}
+              audioAssets={audioAssets}
+              audioTracks={audioTracks}
+              audioClips={audioClips}
               currentTime={currentTime}
               soundtrackDuration={audioDuration}
-              soundtrackName={audioFile?.name ?? ''}
               pixelsPerSecond={timelinePixelsPerSecond}
               snapEnabled={snapTimelineEnabled}
-              onSeek={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
+              onSeek={(time) => { const playableTime = clampTimelineTime(time, sequenceDuration); playbackTimeRef.current = playableTime; setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); }}
               onTrackChange={updateTrack}
+              onAudioTrackChange={updateAudioTrack}
+              onAddAudioTrack={addAudioTrack}
+              onDuplicateAudioTrack={duplicateAudioTrack}
+              onRemoveAudioTrack={removeAudioTrack}
               onMoveClip={moveClipToTrack}
+              onMoveAudioClip={moveAudioClip}
+              onSelectAudioClip={setSelectedAudioClipId}
+              onAudioClipChange={updateAudioClip}
+              onDuplicateAudioClip={duplicateAudioClip}
+              onRemoveAudioClip={removeAudioClip}
               onSelect={setSelectedClipId}
               onChange={updateClip}
               onTransform={updateTransform}
+              onEndEditCoalescing={endEditCoalescing}
               onRemove={removeClip}
               onSplit={handleSplit}
               onDuplicate={duplicateClip}
               onSelectTitle={setSelectedTitleId}
-              onSeekTitle={(time) => { const playableTime = clampTimelineTime(time, audioDuration); setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); if (audioRef.current) audioRef.current.currentTime = playableTime; }}
+              onTitleChange={updateTitle}
+              onSeekTitle={(time) => { const playableTime = clampTimelineTime(time, sequenceDuration); playbackTimeRef.current = playableTime; setPreviewSeekRevision((revision) => revision + 1); setCurrentTime(playableTime); }}
               onAddMarker={addMarker}
               onRenameMarker={renameMarker}
               onRemoveMarker={removeMarker}
             />
           </div>
+          {visualCoverage.uncoveredIntervals.length > 0 && <p id="visual-coverage-warning" role="status" className="rounded-md border border-amber-300 bg-amber-50 p-3 text-sm text-neutral-700">
+            Visual coverage warning: {visualCoverage.uncoveredDuration.toFixed(2)} seconds of soundtrack have no visible clips across {visualCoverage.uncoveredIntervals.length} {visualCoverage.uncoveredIntervals.length === 1 ? 'gap' : 'gaps'}.
+            {' '}Preview the full soundtrack and move, add, or extend visible clips to fill gaps before rendering. Timing is not changed automatically.
+          </p>}
+          {exportComplete && <section aria-label="Render complete" className="flex flex-wrap items-center justify-between gap-4 rounded-lg border border-moss/30 bg-lime/20 p-4">
+            <div>
+              <p role="status" className="text-sm font-semibold text-ink">Last render completed. Any further edits need a new render.</p>
+              <p className="mt-1 text-xs text-neutral-600">Enjoyed creating your video? You can support the creator with a coffee. Completely optional.</p>
+            </div>
+            <a
+              href="https://buymeacoffee.com/alexmano12"
+              target="_blank"
+              rel="noopener noreferrer"
+              className="inline-flex min-h-11 shrink-0 items-center justify-center gap-2 rounded-md border border-moss bg-white px-4 py-2 text-sm font-semibold text-moss transition hover:bg-lime/50 focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-moss"
+            >
+              <svg viewBox="0 0 24 24" aria-hidden="true" className="h-5 w-5 fill-none stroke-current stroke-2"><path d="M4 8h12v7a4 4 0 0 1-4 4H8a4 4 0 0 1-4-4V8Zm12 0h2a3 3 0 0 1 0 6h-2M3 22h15M7 2v3m5-3v3" /></svg>
+              Buy me a coffee
+              <span className="sr-only">(opens in a new tab)</span>
+            </a>
+          </section>}
           <div className="flex flex-wrap items-center justify-between gap-4 border-t border-neutral-200 pt-5">
             <button type="button" onClick={() => setStep(2)} className="px-1 py-3 text-sm text-neutral-600">← Back to visuals</button>
-            <div className="flex items-center gap-4">
+            <div className="flex flex-wrap items-center gap-4">
               {statusMessage && !isExporting && <p role="status" className="max-w-sm text-right text-xs text-neutral-600">{statusMessage}</p>}
-              {exportComplete ? (
-                <button type="button" onClick={startNewVideo} className="bg-moss px-6 py-3 text-sm font-semibold text-white">Start a new video <span aria-hidden="true">→</span></button>
-              ) : (
-                <button ref={exportButtonRef} type="button" onClick={() => void handleExport()} disabled={!audioFile || !clips.length} className="bg-moss px-6 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40">Create video <span aria-hidden="true">→</span></button>
-              )}
+              {exportComplete && <>
+                <button type="button" onClick={() => {
+                  setExportComplete(false);
+                  setStatusMessage('');
+                  editorHeadingRef.current?.focus();
+                }} className="border border-neutral-300 px-4 py-3 text-sm font-semibold text-neutral-700">Continue editing</button>
+                <button type="button" onClick={() => void startNewVideo()} className="border border-neutral-300 px-4 py-3 text-sm font-semibold text-neutral-700">Start new project</button>
+              </>}
+              <button
+                ref={exportButtonRef}
+                type="button"
+                onClick={() => void handleExport()}
+                disabled={!clips.length || isExporting || isImportingVisuals || isProjectPackageBusy}
+                aria-describedby={[
+                  visualCoverage.uncoveredIntervals.length > 0 ? 'visual-coverage-warning' : '',
+                ].filter(Boolean).join(' ') || undefined}
+                className="bg-moss px-6 py-3 text-sm font-semibold text-white disabled:cursor-not-allowed disabled:opacity-40"
+              >
+                {exportComplete ? 'Render revised video' : 'Render video'} <span aria-hidden="true">→</span>
+              </button>
             </div>
           </div>
         </section>}
-        <audio className="sr-only" ref={audioRef} src={audioUrl ?? undefined} onTimeUpdate={(event) => setCurrentTime(clampTimelineTime(event.currentTarget.currentTime, audioDuration))} onEnded={() => { setCurrentTime(audioDuration); setIsPlaying(false); }} />
       </main>
+      <AudioTimelinePlayback
+        assets={audioAssets}
+        tracks={audioTracks}
+        clips={audioClips}
+        currentTime={currentTime}
+        isPlaying={isPlaying}
+        seekRevision={previewSeekRevision}
+        volume={previewVolume}
+        onPlaybackError={(message) => {
+          setIsPlaying(false);
+          setStatusMessage(message);
+        }}
+      />
       {isExporting && <ExportProgress
         progress={exportProgress}
         isExporting

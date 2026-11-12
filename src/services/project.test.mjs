@@ -8,14 +8,10 @@ const sampleProject = () => ({
   name: 'Social cut',
   createdAt: '2026-11-02T12:00:00.000Z',
   updatedAt: '2026-11-02T12:30:00.000Z',
-  schemaVersion: 5,
-  audio: {
-    id: 'audio-1',
-    fileName: 'narration.wav',
-    mimeType: 'audio/wav',
-    size: 482_100,
-    duration: 42.5,
-  },
+  schemaVersion: 6,
+  audioAssets: [{ id: 'audio-1', fileName: 'narration.wav', mimeType: 'audio/wav', size: 482_100, duration: 42.5 }],
+  audioTracks: [{ id: 'audio-track-1', name: 'Audio 1', order: 0, visible: true, locked: false }],
+  audioClips: [{ id: 'audio-clip-1', assetId: 'audio-1', trackId: 'audio-track-1', timelinePosition: 0, start: 0, end: 42.5, volume: 1 }],
   assets: [
     {
       id: 'visual-image',
@@ -75,6 +71,13 @@ const sampleProject = () => ({
   },
 });
 
+const legacyProject = () => {
+  const { audioAssets, audioTracks, audioClips, ...project } = sampleProject();
+  project.schemaVersion = 5;
+  project.audio = audioAssets[0];
+  return project;
+};
+
 test('serializes and parses a representative project edit/settings round-trip', () => {
   const project = sampleProject();
   const json = serializeProject(project);
@@ -84,9 +87,11 @@ test('serializes and parses a representative project edit/settings round-trip', 
   assert.deepEqual(JSON.parse(json).outputSettings, project.outputSettings);
 });
 
-test('supports an empty audio slot and no visual edits', () => {
+test('supports an empty audio collection and no visual edits', () => {
   const project = sampleProject();
-  project.audio = null;
+  project.audioAssets = [];
+  project.audioTracks = [];
+  project.audioClips = [];
   project.assets = [];
   project.clips = [];
   assert.deepEqual(parseProject(serializeProject(project)), project);
@@ -95,23 +100,23 @@ test('supports an empty audio slot and no visual edits', () => {
 test('reports invalid JSON and malformed schema documents', () => {
   assert.throws(() => parseProject('{not json'), /Invalid project JSON:/);
   const missingAudio = sampleProject();
-  delete missingAudio.audio;
-  assert.throws(() => parseProject(JSON.stringify(missingAudio)), /project\.audio/);
+  delete missingAudio.audioAssets;
+  assert.throws(() => parseProject(JSON.stringify(missingAudio)), /project\.audioAssets/);
   assert.throws(
-    () => parseProject(JSON.stringify({ ...sampleProject(), schemaVersion: 6 })),
-    /unsupported schema version 6/,
+    () => parseProject(JSON.stringify({ ...sampleProject(), schemaVersion: 7 })),
+    /unsupported schema version 7/,
   );
 });
 
 test('migrates a legacy v1 ordered sequence to a default track and v5 without changing clip timing or edits', () => {
-  const legacy = sampleProject();
+  const legacy = legacyProject();
   legacy.schemaVersion = 1;
   delete legacy.tracks;
   delete legacy.titleOverlays;
   delete legacy.markers;
   legacy.clips = legacy.clips.map(({ trackId, timelinePosition, stillDurationMode, ...clip }) => clip);
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.schemaVersion, 5);
+  assert.equal(migrated.schemaVersion, 6);
   assert.deepEqual(migrated.titleOverlays, []);
   assert.deepEqual(migrated.markers, []);
   assert.deepEqual(migrated.tracks, [{
@@ -128,48 +133,49 @@ test('migrates a legacy v1 ordered sequence to a default track and v5 without ch
   assert.equal(migrated.clips[1].start, legacy.clips[1].start);
   assert.equal(migrated.clips[1].end, legacy.clips[1].end);
   assert.deepEqual(migrated.assets, legacy.assets);
-  assert.deepEqual(migrated.audio, legacy.audio);
+  assert.deepEqual(migrated.audioAssets, [legacy.audio]);
+  assert.equal(migrated.audioClips[0].end, legacy.audio.duration);
 });
 
 test('migrates v2 projects to v5 while preserving tracks, clips, media, and output settings', () => {
-  const legacy = sampleProject();
+  const legacy = legacyProject();
   legacy.schemaVersion = 2;
   delete legacy.titleOverlays;
   delete legacy.markers;
   legacy.clips = legacy.clips.map(({ stillDurationMode, ...clip }) => clip);
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.schemaVersion, 5);
+  assert.equal(migrated.schemaVersion, 6);
   assert.deepEqual(migrated.titleOverlays, []);
   assert.deepEqual(migrated.markers, []);
   assert.deepEqual(migrated.tracks, legacy.tracks);
   assert.deepEqual(migrated.clips, legacy.clips.map((clip) => ({ ...clip, stillDurationMode: 'custom' })));
   assert.deepEqual(migrated.assets, legacy.assets);
-  assert.deepEqual(migrated.audio, legacy.audio);
+  assert.deepEqual(migrated.audioAssets, [legacy.audio]);
   assert.deepEqual(migrated.outputSettings, legacy.outputSettings);
 });
 
 test('migrates v3 documents by preserving existing fields and adding an empty marker list', () => {
-  const legacy = sampleProject();
+  const legacy = legacyProject();
   legacy.schemaVersion = 3;
   delete legacy.markers;
   legacy.clips = legacy.clips.map(({ stillDurationMode, ...clip }) => clip);
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.schemaVersion, 5);
+  assert.equal(migrated.schemaVersion, 6);
   assert.deepEqual(migrated.markers, []);
   assert.deepEqual(migrated.titleOverlays, legacy.titleOverlays);
   assert.deepEqual(migrated.tracks, legacy.tracks);
   assert.deepEqual(migrated.clips, legacy.clips.map((clip) => ({ ...clip, stillDurationMode: 'custom' })));
   assert.deepEqual(migrated.assets, legacy.assets);
-  assert.deepEqual(migrated.audio, legacy.audio);
+  assert.deepEqual(migrated.audioAssets, [legacy.audio]);
   assert.deepEqual(migrated.outputSettings, legacy.outputSettings);
 });
 
 test('migrates v4 still durations as custom and round-trips the v5 mode', () => {
-  const legacy = sampleProject();
+  const legacy = legacyProject();
   legacy.schemaVersion = 4;
   legacy.clips = legacy.clips.map(({ stillDurationMode, ...clip }) => clip);
   const migrated = parseProject(JSON.stringify(legacy));
-  assert.equal(migrated.schemaVersion, 5);
+  assert.equal(migrated.schemaVersion, 6);
   assert.equal(migrated.clips[0].stillDuration, 45);
   assert.equal(migrated.clips[0].stillDurationMode, 'custom');
   assert.deepEqual(parseProject(serializeProject(migrated)), migrated);
@@ -276,7 +282,7 @@ test('rejects duplicate IDs and missing visual asset references', () => {
   assert.throws(() => serializeProject(missingTrack), /references missing visual track "not-present"/);
 
   const duplicateAudioId = sampleProject();
-  duplicateAudioId.audio.id = duplicateAudioId.assets[0].id;
+  duplicateAudioId.audioAssets[0].id = duplicateAudioId.assets[0].id;
   assert.throws(() => serializeProject(duplicateAudioId), /duplicate id "visual-image"/);
 });
 
@@ -292,6 +298,17 @@ test('rejects invalid track schema, duplicate track order, and malformed timelin
   const badPosition = sampleProject();
   badPosition.clips[0].timelinePosition = -1;
   assert.throws(() => serializeProject(badPosition), /clips\[0\]\.timelinePosition/);
+});
+
+test('validates audio track order and clip references even when the project has no still images', () => {
+  const missingAudioTrack = sampleProject();
+  missingAudioTrack.clips = [missingAudioTrack.clips[1]];
+  missingAudioTrack.audioClips[0].trackId = 'not-present';
+  assert.throws(() => serializeProject(missingAudioTrack), /references missing audio track/);
+
+  const duplicateAudioOrder = sampleProject();
+  duplicateAudioOrder.audioTracks.push({ ...duplicateAudioOrder.audioTracks[0], id: 'audio-track-2', name: 'Audio 2' });
+  assert.throws(() => serializeProject(duplicateAudioOrder), /track order values must be unique/);
 });
 
 test('rejects invalid numeric values and malformed timeline transforms', () => {
@@ -318,7 +335,7 @@ test('prevents runtime File/object URL fields from entering serialized project J
   assert.throws(() => serializeProject(withVisualRuntimeFields), /unexpected field file/);
 
   const withAudioRuntimeFields = sampleProject();
-  withAudioRuntimeFields.audio.url = 'blob:https://example.invalid/audio';
+  withAudioRuntimeFields.audioAssets[0].url = 'blob:https://example.invalid/audio';
   assert.throws(() => serializeProject(withAudioRuntimeFields), /unexpected field url/);
 
   const withUrlInMetadata = sampleProject();

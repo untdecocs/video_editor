@@ -6,8 +6,10 @@ export interface HistoryOptions {
 export interface History<T> {
   /** Return an isolated copy of the current snapshot. */
   getState(): T;
-  /** Add a snapshot and discard any redo branch. */
-  push(snapshot: T): T;
+  /** Add a snapshot and discard any redo branch. Consecutive matching keys coalesce. */
+  push(snapshot: T, coalescingKey?: string): T;
+  /** End the current coalescing group. */
+  endCoalescing(): void;
   /** Move to the previous snapshot, or stay at the oldest snapshot. */
   undo(): T;
   /** Move to the next snapshot, or stay at the newest snapshot. */
@@ -44,24 +46,40 @@ export function createHistory<T>(
 
   const snapshots = [cloneSnapshot(initialSnapshot)];
   let currentIndex = 0;
+  let activeCoalescingKey: string | null = null;
 
   const history: History<T> = {
     getState() {
       return cloneSnapshot(snapshots[currentIndex]);
     },
 
-    push(snapshot) {
+    push(snapshot, coalescingKey) {
       const nextSnapshot = cloneSnapshot(snapshot);
+      if (
+        coalescingKey
+        && activeCoalescingKey === coalescingKey
+        && currentIndex === snapshots.length - 1
+      ) {
+        snapshots[currentIndex] = nextSnapshot;
+        return cloneSnapshot(nextSnapshot);
+      }
+
       snapshots.splice(currentIndex + 1);
       snapshots.push(nextSnapshot);
       if (snapshots.length > limit) {
         snapshots.shift();
       }
       currentIndex = snapshots.length - 1;
+      activeCoalescingKey = coalescingKey ?? null;
       return cloneSnapshot(snapshots[currentIndex]);
     },
 
+    endCoalescing() {
+      activeCoalescingKey = null;
+    },
+
     undo() {
+      activeCoalescingKey = null;
       if (currentIndex > 0) {
         currentIndex -= 1;
       }
@@ -69,6 +87,7 @@ export function createHistory<T>(
     },
 
     redo() {
+      activeCoalescingKey = null;
       if (currentIndex < snapshots.length - 1) {
         currentIndex += 1;
       }
@@ -81,6 +100,7 @@ export function createHistory<T>(
       );
       snapshots.splice(0, snapshots.length, retainedSnapshot);
       currentIndex = 0;
+      activeCoalescingKey = null;
       return cloneSnapshot(retainedSnapshot);
     },
 

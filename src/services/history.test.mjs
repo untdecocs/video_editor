@@ -40,6 +40,42 @@ test('pushing after undo discards the redo branch', () => {
   assert.equal(history.redo(), 'branch');
 });
 
+test('coalesces matching adjustments into one undo step', () => {
+  const history = createHistory({ value: 0 });
+  history.push({ value: 1 }, 'zoom');
+  history.push({ value: 2 }, 'zoom');
+  history.push({ value: 3 }, 'zoom');
+
+  assert.equal(history.length, 2);
+  assert.deepEqual(history.undo(), { value: 0 });
+  assert.deepEqual(history.redo(), { value: 3 });
+});
+
+test('ends coalescing groups and keeps different edits separate', () => {
+  const history = createHistory({ value: 0 });
+  history.push({ value: 1 }, 'zoom');
+  history.endCoalescing();
+  history.push({ value: 2 }, 'zoom');
+  history.push({ value: 3 }, 'position');
+
+  assert.equal(history.length, 4);
+  assert.deepEqual(history.undo(), { value: 2 });
+  assert.deepEqual(history.undo(), { value: 1 });
+});
+
+test('ordinary pushes and undo/redo separate coalescing groups', () => {
+  const history = createHistory({ value: 0 });
+  history.push({ value: 1 }, 'zoom');
+  history.push({ value: 2 });
+  history.push({ value: 3 }, 'zoom');
+  history.undo();
+  history.redo();
+  history.push({ value: 4 }, 'zoom');
+
+  assert.equal(history.length, 5);
+  assert.deepEqual(history.undo(), { value: 3 });
+});
+
 test('evicts the oldest snapshots when the configured limit is exceeded', () => {
   const history = createHistory(0, { limit: 3 });
   history.push(1);

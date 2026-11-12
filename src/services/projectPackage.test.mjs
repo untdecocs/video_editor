@@ -13,8 +13,10 @@ const project = () => ({
   name: 'Portable edit',
   createdAt: '2026-11-02T12:00:00.000Z',
   updatedAt: '2026-11-02T12:30:00.000Z',
-  schemaVersion: 5,
-  audio: { id: 'audio-1', fileName: 'track.wav', mimeType: 'audio/wav', size: 4, duration: 12 },
+  schemaVersion: 6,
+  audioAssets: [{ id: 'audio-1', fileName: 'track.wav', mimeType: 'audio/wav', size: 4, duration: 12 }],
+  audioTracks: [{ id: 'audio-track-1', name: 'Audio 1', order: 0, visible: true, locked: false }],
+  audioClips: [{ id: 'audio-clip-1', assetId: 'audio-1', trackId: 'audio-track-1', timelinePosition: 0, start: 0, end: 12, volume: 1 }],
   assets: [{
     id: 'visual-1',
     fileName: 'still.png',
@@ -56,7 +58,7 @@ const project = () => ({
 });
 
 const media = () => ({
-  audio: new Blob(['1234'], { type: 'audio/wav' }),
+  audioAssets: { 'audio-1': new Blob(['1234'], { type: 'audio/wav' }) },
   assets: { 'visual-1': new Blob(['12345'], { type: 'image/png' }) },
 });
 
@@ -72,10 +74,34 @@ test('round-trips every project metadata field and all media bytes', async () =>
     webcrypto,
   );
   assert.deepEqual(imported.document, document);
-  assert.equal(await imported.media.audio.text(), '1234');
+  assert.equal(await imported.media.audioAssets['audio-1'].text(), '1234');
   assert.equal(await imported.media.assets['visual-1'].text(), '12345');
-  assert.equal(imported.media.audio.type, 'audio/wav');
+  assert.equal(imported.media.audioAssets['audio-1'].type, 'audio/wav');
   assert.equal(imported.media.assets['visual-1'].type, 'image/png');
+});
+
+test('packages and restores multiple audio assets and tracks', async () => {
+  const document = project();
+  document.audioAssets.push({ id: 'audio-2', fileName: 'voice.wav', mimeType: 'audio/wav', size: 3, duration: 5 });
+  document.audioTracks.push({ id: 'audio-track-2', name: 'Voice', order: 1, visible: true, locked: false });
+  document.audioClips.push({
+    id: 'audio-clip-2',
+    assetId: 'audio-2',
+    trackId: 'audio-track-2',
+    timelinePosition: 12,
+    start: 0,
+    end: 5,
+    volume: 0.8,
+  });
+  const blobs = media();
+  blobs.audioAssets['audio-2'] = new Blob(['xyz'], { type: 'audio/wav' });
+  const imported = await parseProjectPackage(
+    await buildProjectPackage(document, blobs, webcrypto),
+    webcrypto,
+  );
+  assert.deepEqual(imported.document.audioClips, document.audioClips);
+  assert.equal(await imported.media.audioAssets['audio-1'].text(), '1234');
+  assert.equal(await imported.media.audioAssets['audio-2'].text(), 'xyz');
 });
 
 test('enforces approved package limits before reading media bytes', async () => {
@@ -106,18 +132,18 @@ test('round-trips large media and rejects malformed large base64 payloads', asyn
   const audioBytes = new Uint8Array(mediaSize);
   for (let index = 0; index < audioBytes.length; index += 1) audioBytes[index] = index % 251;
   const document = project();
-  document.audio.size = mediaSize;
+  document.audioAssets[0].size = mediaSize;
   const packageJson = await buildProjectPackage(
     document,
     {
-      audio: new Blob([audioBytes], { type: 'audio/wav' }),
+      audioAssets: { 'audio-1': new Blob([audioBytes], { type: 'audio/wav' }) },
       assets: media().assets,
     },
     webcrypto,
   );
 
   const imported = await parseProjectPackage(packageJson, webcrypto);
-  const importedAudio = imported.media.audio;
+  const importedAudio = imported.media.audioAssets['audio-1'];
   assert.ok(importedAudio);
   assert.equal(importedAudio.size, mediaSize);
   assert.equal(
@@ -198,15 +224,15 @@ test('rejects missing, extra, and duplicate media records', async () => {
 test('build rejects missing, extra, and size-inconsistent source blobs', async () => {
   const document = project();
   await assert.rejects(
-    buildProjectPackage(document, { audio: media().audio, assets: {} }, webcrypto),
+    buildProjectPackage(document, { audioAssets: media().audioAssets, assets: {} }, webcrypto),
     /missing or its size does not match/,
   );
   await assert.rejects(
-    buildProjectPackage(document, { audio: media().audio, assets: { 'visual-1': media().assets['visual-1'], unexpected: new Blob(['x']) } }, webcrypto),
+    buildProjectPackage(document, { audioAssets: media().audioAssets, assets: { 'visual-1': media().assets['visual-1'], unexpected: new Blob(['x']) } }, webcrypto),
     /Unexpected media record/,
   );
   await assert.rejects(
-    buildProjectPackage(document, { audio: new Blob(['x']), assets: media().assets }, webcrypto),
+    buildProjectPackage(document, { audioAssets: { 'audio-1': new Blob(['x']) }, assets: media().assets }, webcrypto),
     /missing or its size does not match/,
   );
 });
@@ -220,10 +246,10 @@ test('failed package validation leaves source project and media untouched', asyn
   const document = project();
   const blobs = media();
   const sourceSnapshot = structuredClone(document);
-  const originalAudio = await blobs.audio.text();
+  const originalAudio = await blobs.audioAssets['audio-1'].text();
   const invalid = await build();
   invalid.media.records[0].sha256 = 'f'.repeat(64);
   await assert.rejects(parseProjectPackage(JSON.stringify(invalid), webcrypto), /integrity check/);
   assert.deepEqual(document, sourceSnapshot);
-  assert.equal(await blobs.audio.text(), originalAudio);
+  assert.equal(await blobs.audioAssets['audio-1'].text(), originalAudio);
 });

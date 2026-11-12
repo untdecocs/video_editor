@@ -8,10 +8,15 @@ export type ApprovedMediaLimits = typeof mediaLimits;
 export const APPROVED_MEDIA_LIMITS = mediaLimits;
 
 export function getProjectMediaBytes(
-  audioFile: Pick<File, 'size'> | null,
+  audioFiles: Pick<File, 'size'> | null | readonly Pick<File, 'size'>[],
   assets: readonly { file: Pick<File, 'size'> }[],
 ): number {
-  return (audioFile?.size ?? 0) + assets.reduce((total, asset) => total + asset.file.size, 0);
+  const audioSize = audioFiles === null
+    ? 0
+    : 'size' in audioFiles
+      ? audioFiles.size
+      : audioFiles.reduce((total, file) => total + file.size, 0);
+  return audioSize + assets.reduce((total, asset) => total + asset.file.size, 0);
 }
 
 export function validateApprovedMediaFile(

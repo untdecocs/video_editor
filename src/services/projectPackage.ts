@@ -180,22 +180,25 @@ export async function buildProjectPackage(
 ): Promise<string> {
   const document = validateProjectDocument(documentValue);
   const subtle = cryptoSubtle(cryptoProvider);
-  if (!media || !media.assets || typeof media.assets !== 'object') {
+  if (!media || !media.assets || typeof media.assets !== 'object'
+    || !media.audioAssets || typeof media.audioAssets !== 'object' || Array.isArray(media.audioAssets)) {
     throw new ProjectPackageError('Project media collection is malformed.');
   }
   const records: PackageRecord[] = [];
   let totalSize = 0;
-  if (document.audio) {
-    if (!(media.audio instanceof Blob) || media.audio.size !== document.audio.size) {
-      throw new ProjectPackageError(`Audio "${document.audio.fileName}" is missing or its size does not match project metadata.`);
+  const expectedAudioIds = new Set(document.audioAssets.map((asset) => asset.id));
+  const extraAudioId = Object.keys(media.audioAssets).find((id) => !expectedAudioIds.has(id));
+  if (extraAudioId) throw new ProjectPackageError(`Unexpected audio record "${extraAudioId}" is not present in the project.`);
+  for (const asset of document.audioAssets) {
+    const blob = media.audioAssets[asset.id];
+    if (!(blob instanceof Blob) || blob.size !== asset.size) {
+      throw new ProjectPackageError(`Audio "${asset.fileName}" is missing or its size does not match project metadata.`);
     }
-    if (totalSize + media.audio.size > MAX_TOTAL_MEDIA_BYTES) throw new ProjectPackageError('Project media exceeds this build’s portable-package safety guard. Your open project is unchanged; try smaller media copies and keep the originals.');
+    if (totalSize + blob.size > MAX_TOTAL_MEDIA_BYTES) throw new ProjectPackageError('Project media exceeds this build’s portable-package safety guard. Your open project is unchanged; try smaller media copies and keep the original file.');
     records.push(await packageRecord(
-      document.audio.id, 'audio', document.audio.fileName, document.audio.mimeType, media.audio, subtle, 0, approvedLimits,
+      asset.id, 'audio', asset.fileName, asset.mimeType, blob, subtle, totalSize, approvedLimits,
     ));
-    totalSize += media.audio.size;
-  } else if (media.audio !== null) {
-    throw new ProjectPackageError('Project has unexpected audio media.');
+    totalSize += blob.size;
   }
   const expectedIds = new Set(document.assets.map((asset) => asset.id));
   const extraId = Object.keys(media.assets).find((id) => !expectedIds.has(id));
@@ -245,11 +248,11 @@ export async function parseProjectPackage(
   const media = assertRecord(root.media, 'Project media', ['records']);
   if (!Array.isArray(media.records)) throw new ProjectPackageError('Project media records must be an array.');
   const expected = new Map<string, { kind: PackageRecord['kind']; fileName: string; mimeType: string; size: number }>();
-  if (document.audio) expected.set(document.audio.id, { kind: 'audio', ...document.audio });
+  for (const asset of document.audioAssets) expected.set(asset.id, { kind: 'audio', ...asset });
   for (const asset of document.assets) expected.set(asset.id, { ...asset });
   const seen = new Set<string>();
   const blobs: Record<string, Blob> = {};
-  let audio: Blob | null = null;
+  const audioAssets: Record<string, Blob> = {};
   const subtle = cryptoSubtle(cryptoProvider);
   let totalSize = 0;
   for (const [index, raw] of media.records.entries()) {
@@ -289,12 +292,12 @@ export async function parseProjectPackage(
     const blobBuffer = new ArrayBuffer(bytes.byteLength);
     new Uint8Array(blobBuffer).set(bytes);
     const blob = new Blob([blobBuffer], { type: mimeType });
-    if (descriptor.kind === 'audio') audio = blob;
+    if (descriptor.kind === 'audio') audioAssets[record.assetId] = blob;
     else blobs[record.assetId] = blob;
   }
   const missing = [...expected.keys()].find((id) => !seen.has(id));
   if (missing) throw new ProjectPackageError(`Project package is missing media record "${expected.get(missing)?.fileName ?? missing}".`);
-  return { document, media: { audio, assets: blobs } };
+  return { document, media: { audioAssets, assets: blobs } };
 }
 
 export function sanitizeProjectPackageFilename(projectName: string): string {

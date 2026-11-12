@@ -43,7 +43,7 @@ export type TimelineClip = {
   start: number;
   end: number;
   stillDuration: number;
-  stillDurationMode: 'custom' | 'match-audio';
+  stillDurationMode: 'custom' | 'match-audio' | 'match-video';
   transition: 'none' | 'fade';
   transform: VisualTransform;
 };
@@ -54,12 +54,58 @@ export type TimelineMarker = {
   label: string;
 };
 
+export type AudioTrack = {
+  id: string;
+  name: string;
+  order: number;
+  visible: boolean;
+  locked: boolean;
+};
+
+export type AudioAsset = {
+  id: string;
+  file: File;
+  url: string;
+  duration: number;
+};
+
+export type AudioClip = {
+  id: string;
+  assetId: string;
+  trackId: string;
+  timelinePosition: number;
+  start: number;
+  end: number;
+  volume: number;
+};
+
 export const MAX_TIMELINE_MARKER_TIME = PORTABLE_PACKAGE_SAFETY_LIMITS.maxTimelineDurationSeconds;
 export const MAX_TIMELINE_DURATION = PORTABLE_PACKAGE_SAFETY_LIMITS.maxTimelineDurationSeconds;
 export const MIN_STILL_DURATION = 0.1;
 export const MAX_TIMELINE_MARKER_LABEL_LENGTH = 80;
 
 export type StillDurationMode = TimelineClip['stillDurationMode'];
+
+export function getAudioClipDuration(clip: AudioClip): number {
+  return Math.max(0, clip.end - clip.start);
+}
+
+export function getAudioTimelineDuration(clips: readonly AudioClip[]): number {
+  return clips.reduce((duration, clip) => Math.max(
+    duration,
+    clip.timelinePosition + getAudioClipDuration(clip),
+  ), 0);
+}
+
+export function getLongestAudioTrackDuration(
+  tracks: readonly AudioTrack[],
+  clips: readonly AudioClip[],
+): number {
+  const visibleTrackIds = new Set(tracks.filter((track) => track.visible).map((track) => track.id));
+  return clips.reduce((duration, clip) => visibleTrackIds.has(clip.trackId)
+    ? Math.max(duration, clip.timelinePosition + getAudioClipDuration(clip))
+    : duration, 0);
+}
 
 /** Duration available to a still at a timeline position, with a usable 0.1s minimum. */
 export function getStillDurationLimit(timelinePosition: number): number {
@@ -78,12 +124,20 @@ export function setStillDurationMode(
   clip: TimelineClip,
   mode: StillDurationMode,
   audioDuration: number,
+  videoDuration = 0,
 ): TimelineClip {
   if (mode === 'match-audio' && Number.isFinite(audioDuration) && audioDuration > 0) {
     return {
       ...clip,
       stillDurationMode: mode,
-      stillDuration: normalizeStillDuration(audioDuration, clip.timelinePosition),
+      stillDuration: normalizeStillDuration(audioDuration - clip.timelinePosition, clip.timelinePosition),
+    };
+  }
+  if (mode === 'match-video' && Number.isFinite(videoDuration) && videoDuration > 0) {
+    return {
+      ...clip,
+      stillDurationMode: mode,
+      stillDuration: normalizeStillDuration(videoDuration - clip.timelinePosition, clip.timelinePosition),
     };
   }
   return { ...clip, stillDurationMode: mode };
@@ -93,12 +147,16 @@ export function setStillDurationMode(
 export function updateMatchedStillDurations(
   clips: TimelineClip[],
   audioDuration: number,
+  videoDuration = 0,
 ): TimelineClip[] {
-  if (!Number.isFinite(audioDuration) || audioDuration <= 0) return clips;
+  if ((!Number.isFinite(audioDuration) || audioDuration <= 0)
+    && (!Number.isFinite(videoDuration) || videoDuration <= 0)) return clips;
   let changed = false;
   const next = clips.map((clip) => {
-    if (clip.end > clip.start || clip.stillDurationMode !== 'match-audio') return clip;
-    const stillDuration = normalizeStillDuration(audioDuration, clip.timelinePosition);
+    if (clip.end > clip.start || (clip.stillDurationMode !== 'match-audio' && clip.stillDurationMode !== 'match-video')) return clip;
+    const sourceDuration = clip.stillDurationMode === 'match-audio' ? audioDuration : videoDuration;
+    if (!Number.isFinite(sourceDuration) || sourceDuration <= 0) return clip;
+    const stillDuration = normalizeStillDuration(sourceDuration - clip.timelinePosition, clip.timelinePosition);
     if (stillDuration === clip.stillDuration) return clip;
     changed = true;
     return { ...clip, stillDuration };
@@ -165,6 +223,107 @@ export function getClipDuration(clip: TimelineClip): number {
 
 export function getTimelineDuration(clips: TimelineClip[]): number {
   return clips.reduce((duration, clip) => Math.max(duration, clip.timelinePosition + getClipDuration(clip)), 0);
+}
+
+export function getVideoTimelineDuration(
+  clips: readonly TimelineClip[],
+  assets: readonly Pick<TimelineAsset, 'id' | 'kind'>[],
+  tracks: readonly Pick<TimelineTrack, 'id' | 'visible'>[],
+): number {
+  const videoAssetIds = new Set(assets.filter((asset) => asset.kind === 'video').map((asset) => asset.id));
+  const visibleTrackIds = new Set(tracks.filter((track) => track.visible).map((track) => track.id));
+  return clips.reduce((duration, clip) => videoAssetIds.has(clip.assetId) && visibleTrackIds.has(clip.trackId)
+    ? Math.max(duration, clip.timelinePosition + getClipDuration(clip))
+    : duration, 0);
+}
+
+/** A half-open interval [start, end), in absolute timeline seconds. */
+export type TimelineInterval = {
+  start: number;
+  end: number;
+};
+
+export type VisualCoverage = {
+  soundtrackDuration: number;
+  /** Union duration inside the soundtrack, never a sum of overlapping layers. */
+  coveredDuration: number;
+  uncoveredDuration: number;
+  uncoveredIntervals: TimelineInterval[];
+  /** Union duration strictly beyond the soundtrack boundary, excluding gaps. */
+  overflowDuration: number;
+  overflowIntervals: TimelineInterval[];
+};
+
+/**
+ * Measure visual coverage against [0, soundtrackDuration) without changing inputs.
+ * Only clips referencing an available asset count; durations use getClipDuration,
+ * including the stored duration of match-audio stills (no source-duration clamp).
+ * Omitted tracks means all clips count. Supplied tracks restrict coverage to
+ * known visible tracks, just like getActiveClips; locking/order do not matter.
+ * Non-finite ranges are ignored; negative positions are intersected with [0, ∞).
+ * Invalid/negative soundtrack durations become zero, so all visual content is
+ * overflow. Returned intervals are sorted, disjoint, and merge touching ranges.
+ */
+export function getVisualCoverage(
+  clips: readonly TimelineClip[],
+  assets: readonly TimelineAsset[],
+  soundtrackDuration: number,
+  tracks?: readonly Pick<TimelineTrack, 'id' | 'visible'>[],
+): VisualCoverage {
+  const duration = Number.isFinite(soundtrackDuration) ? Math.max(0, soundtrackDuration) : 0;
+  const assetIds = new Set(assets.map((asset) => asset.id));
+  const visibleTracks = tracks === undefined
+    ? undefined
+    : new Set(tracks.filter((track) => track.visible).map((track) => track.id));
+  const intervals: TimelineInterval[] = [];
+  for (const clip of clips) {
+    if (!assetIds.has(clip.assetId) || (visibleTracks && !visibleTracks.has(clip.trackId))) continue;
+    const clipDuration = getClipDuration(clip);
+    const end = clip.timelinePosition + clipDuration;
+    if (!Number.isFinite(clip.timelinePosition) || !Number.isFinite(clipDuration)
+      || !Number.isFinite(end) || clipDuration <= 0) continue;
+    const start = Math.max(0, clip.timelinePosition);
+    if (end > start) intervals.push({ start, end });
+  }
+  intervals.sort((a, b) => a.start - b.start || a.end - b.end);
+  const merged: TimelineInterval[] = [];
+  for (const interval of intervals) {
+    const previous = merged[merged.length - 1];
+    if (previous && interval.start <= previous.end) {
+      previous.end = Math.max(previous.end, interval.end);
+    } else {
+      merged.push(interval);
+    }
+  }
+
+  const uncoveredIntervals: TimelineInterval[] = [];
+  const overflowIntervals: TimelineInterval[] = [];
+  let cursor = 0;
+  let overflowDuration = 0;
+  for (const interval of merged) {
+    const start = Math.min(duration, interval.start);
+    const end = Math.min(duration, interval.end);
+    if (start > cursor) uncoveredIntervals.push({ start: cursor, end: start });
+    cursor = Math.max(cursor, end);
+    if (interval.end > duration) {
+      const overflowStart = Math.max(duration, interval.start);
+      overflowIntervals.push({ start: overflowStart, end: interval.end });
+      overflowDuration += interval.end - overflowStart;
+    }
+  }
+  if (cursor < duration) uncoveredIntervals.push({ start: cursor, end: duration });
+  const uncoveredDuration = uncoveredIntervals.reduce(
+    (sum, interval) => sum + (interval.end - interval.start),
+    0,
+  );
+  return {
+    soundtrackDuration: duration,
+    coveredDuration: duration - uncoveredDuration,
+    uncoveredDuration,
+    uncoveredIntervals,
+    overflowDuration,
+    overflowIntervals,
+  };
 }
 
 export function clampTimelineTime(time: number, duration: number): number {
@@ -304,7 +463,7 @@ export function splitClipAtTimelineTime(clips: TimelineClip[], clipId: string, t
   const secondDuration = clip.stillDuration - firstDuration;
   if (firstDuration <= 0 || secondDuration <= 0) return clips;
   const index = clips.indexOf(clip);
-  const stillDurationMode = clip.stillDurationMode === 'match-audio' ? 'custom' : clip.stillDurationMode;
+  const stillDurationMode: StillDurationMode = 'custom';
   const first = { ...clip, stillDuration: firstDuration, stillDurationMode };
   const second = {
     ...clip,

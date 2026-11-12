@@ -6,7 +6,12 @@ import {
   defaultTransform,
   duplicateTimelineClip,
   getClipDuration,
+  getAudioClipDuration,
+  getAudioTimelineDuration,
+  getLongestAudioTrackDuration,
+  getVideoTimelineDuration,
   getTimelineDuration,
+  getVisualCoverage,
   getTimelinePositionFromDrop,
   moveClip,
   normalizeStillDuration,
@@ -40,6 +45,137 @@ const videoClip = (id, start = 0, end = 10) => ({
   transform: { ...defaultTransform },
 });
 
+const coverageAsset = (clip, kind = 'video') => ({
+  id: clip.assetId,
+  file: new File([], `${clip.id}.mp4`),
+  url: `blob:${clip.id}`,
+  kind,
+  duration: 100,
+});
+
+test('visual coverage distinguishes internal gaps from overflow even when durations balance', () => {
+  const clips = [
+    { ...videoClip('late', 0, 6), timelinePosition: 6 },
+    videoClip('first', 2, 6),
+  ];
+  assert.deepEqual(getVisualCoverage(clips, clips.map((clip) => coverageAsset(clip)), 10), {
+    soundtrackDuration: 10,
+    coveredDuration: 8,
+    uncoveredDuration: 2,
+    uncoveredIntervals: [{ start: 4, end: 6 }],
+    overflowDuration: 2,
+    overflowIntervals: [{ start: 10, end: 12 }],
+  });
+});
+
+test('visual coverage merges overlapping and adjacent clips without counting overlap twice', () => {
+  const clips = [
+    { ...videoClip('later', 0, 4), timelinePosition: 6 },
+    { ...videoClip('overlap', 0, 5), timelinePosition: 3 },
+    { ...videoClip('first', 0, 4), timelinePosition: 1 },
+    { ...videoClip('adjacent', 0, 2), timelinePosition: 10 },
+  ];
+  const result = getVisualCoverage(clips, clips.map((clip) => coverageAsset(clip)), 14);
+  assert.equal(result.coveredDuration, 11);
+  assert.equal(result.uncoveredDuration, 3);
+  assert.deepEqual(result.uncoveredIntervals, [{ start: 0, end: 1 }, { start: 12, end: 14 }]);
+  assert.deepEqual(result.overflowIntervals, []);
+});
+
+test('visual coverage reports disjoint overflow separately from soundtrack gaps', () => {
+  const clips = [
+    videoClip('crossing', 0, 12),
+    { ...videoClip('overlapping', 0, 4), timelinePosition: 11 },
+    { ...videoClip('beyond', 0, 2), timelinePosition: 17 },
+  ];
+  const result = getVisualCoverage(clips, clips.map((clip) => coverageAsset(clip)), 10);
+  assert.equal(result.coveredDuration, 10);
+  assert.deepEqual(result.uncoveredIntervals, []);
+  assert.deepEqual(result.overflowIntervals, [{ start: 10, end: 15 }, { start: 17, end: 19 }]);
+  assert.equal(result.overflowDuration, 7);
+  const beyondOnly = getVisualCoverage([clips[2]], [coverageAsset(clips[2])], 10);
+  assert.deepEqual(beyondOnly.uncoveredIntervals, [{ start: 0, end: 10 }]);
+  assert.equal(beyondOnly.overflowDuration, 2);
+});
+
+test('visual coverage uses stored still durations and source trims, ignoring missing assets', () => {
+  const clips = [
+    { ...videoClip('trimmed', 20, 23), timelinePosition: 2 },
+    { ...videoClip('still', 0, 0), timelinePosition: 5, stillDuration: 4, stillDurationMode: 'match-audio' },
+    { ...videoClip('missing'), timelinePosition: 0 },
+  ];
+  const result = getVisualCoverage(clips, [coverageAsset(clips[0]), coverageAsset(clips[1], 'image')], 10);
+  assert.equal(result.coveredDuration, 7);
+  assert.deepEqual(result.uncoveredIntervals, [{ start: 0, end: 2 }, { start: 9, end: 10 }]);
+});
+
+test('visual coverage filters hidden and unknown tracks only when tracks are supplied', () => {
+  const clips = [
+    { ...videoClip('visible', 0, 4), trackId: 'visible' },
+    { ...videoClip('hidden', 0, 12), trackId: 'hidden', timelinePosition: 2 },
+    { ...videoClip('unknown', 0, 4), trackId: 'unknown', timelinePosition: 6 },
+  ];
+  const assets = clips.map((clip) => coverageAsset(clip));
+  const tracks = [
+    { id: 'visible', visible: true, locked: true, order: 0, name: 'Visible' },
+    { id: 'hidden', visible: false, locked: false, order: 1, name: 'Hidden' },
+  ];
+  assert.equal(getVisualCoverage(clips, assets, 10).coveredDuration, 10);
+  assert.equal(getVisualCoverage(clips, assets, 10).overflowDuration, 4);
+  const visible = getVisualCoverage(clips, assets, 10, tracks);
+  assert.deepEqual(visible.uncoveredIntervals, [{ start: 4, end: 10 }]);
+  assert.equal(visible.overflowDuration, 0);
+  assert.equal(getVisualCoverage(clips, assets, 10, []).coveredDuration, 0);
+});
+
+test('visual coverage handles empty timelines and normalizes unusable soundtrack durations to zero', () => {
+  assert.deepEqual(getVisualCoverage([], [], 3), {
+    soundtrackDuration: 3,
+    coveredDuration: 0,
+    uncoveredDuration: 3,
+    uncoveredIntervals: [{ start: 0, end: 3 }],
+    overflowDuration: 0,
+    overflowIntervals: [],
+  });
+  const clip = videoClip('one', 0, 2);
+  for (const duration of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+    const result = getVisualCoverage([clip], [coverageAsset(clip)], duration);
+    assert.equal(result.soundtrackDuration, 0);
+    assert.equal(result.coveredDuration, 0);
+    assert.equal(result.uncoveredDuration, 0);
+    assert.deepEqual(result.uncoveredIntervals, []);
+    assert.deepEqual(result.overflowIntervals, [{ start: 0, end: 2 }]);
+  }
+});
+
+test('visual coverage clips negative timeline positions at zero and ignores non-finite ranges', () => {
+  const clips = [
+    { ...videoClip('negative', 0, 4), timelinePosition: -2 },
+    { ...videoClip('before', 0, 1), timelinePosition: -3 },
+    { ...videoClip('nan-position'), timelinePosition: Number.NaN },
+    videoClip('infinite-duration', 0, Number.POSITIVE_INFINITY),
+    { ...videoClip('infinite-position'), timelinePosition: Number.POSITIVE_INFINITY },
+    { ...videoClip('nan-duration', 0, 0), stillDuration: Number.NaN },
+  ];
+  const result = getVisualCoverage(clips, clips.map((clip) => coverageAsset(clip)), 4);
+  assert.equal(result.coveredDuration, 2);
+  assert.deepEqual(result.uncoveredIntervals, [{ start: 2, end: 4 }]);
+  assert.deepEqual(result.overflowIntervals, []);
+});
+
+test('visual coverage does not mutate frozen inputs or share mutable result intervals', () => {
+  const clips = Object.freeze([
+    Object.freeze({ ...videoClip('later', 0, 3), timelinePosition: 4 }),
+    Object.freeze(videoClip('first', 0, 2)),
+  ]);
+  const assets = Object.freeze(clips.map((clip) => Object.freeze(coverageAsset(clip))));
+  const tracks = Object.freeze([Object.freeze({ id: 'track-a', visible: true })]);
+  const result = getVisualCoverage(clips, assets, 6, tracks);
+  result.uncoveredIntervals[0].start = 100;
+  assert.deepEqual(getVisualCoverage(clips, assets, 6, tracks).uncoveredIntervals, [{ start: 2, end: 4 }]);
+  assert.deepEqual(clips.map((clip) => clip.timelinePosition), [4, 0]);
+});
+
 test('uses source range for video and configured duration for stills', () => {
   assert.equal(getClipDuration(videoClip('video', 2, 8)), 6);
   assert.equal(getClipDuration({ ...videoClip('still'), end: 0, stillDuration: 7 }), 7);
@@ -54,17 +190,39 @@ test('resolves matched still durations, preserves unknown last-known values, and
     stillDurationMode: 'custom',
   };
   assert.equal(getClipDuration(still), 45);
-  assert.equal(getClipDuration(setStillDurationMode(still, 'match-audio', 72.5)), 72.5);
+  assert.equal(getClipDuration(setStillDurationMode(still, 'match-audio', 72.5)), 69.5);
   const matched = { ...still, stillDurationMode: 'match-audio', stillDuration: 72.5 };
   const replaced = updateMatchedStillDurations([matched, still], 120);
-  assert.equal(getClipDuration(replaced[0]), 120);
+  assert.equal(getClipDuration(replaced[0]), 117);
   assert.equal(getClipDuration(replaced[1]), 45);
   assert.equal(updateMatchedStillDurations(replaced, 0), replaced);
-  assert.equal(getClipDuration(updateMatchedStillDurations(replaced, Number.NaN)[0]), 120);
+  assert.equal(getClipDuration(updateMatchedStillDurations(replaced, Number.NaN)[0]), 117);
   assert.equal(normalizeStillDuration(0, 0), 0.1);
   assert.equal(normalizeStillDuration(90_000, 10), 86_390);
   assert.equal(getTimelineDuration([still]), 48);
   assert.equal(getClipDuration(videoClip('video', 2, 8)), 6);
+});
+
+test('matches stills to remaining video sequence duration and resolves multiple audio-track lengths', () => {
+  const still = { ...videoClip('still'), end: 0, timelinePosition: 4, stillDuration: 2, stillDurationMode: 'custom' };
+  assert.equal(getClipDuration(setStillDurationMode(still, 'match-video', 0, 15)), 11);
+  const videoDuration = getVideoTimelineDuration(
+    [{ ...videoClip('video', 2, 7), timelinePosition: 3 }],
+    [{ id: 'asset-video', kind: 'video' }],
+    [{ id: 'track-a', visible: true }],
+  );
+  assert.equal(videoDuration, 8);
+
+  const clips = [
+    { id: 'audio-clip-1', assetId: 'audio-1', trackId: 'audio-track-1', timelinePosition: 1, start: 2, end: 6, volume: 1 },
+    { id: 'audio-clip-2', assetId: 'audio-2', trackId: 'audio-track-2', timelinePosition: 3, start: 0, end: 8, volume: 0.5 },
+  ];
+  assert.equal(getAudioClipDuration(clips[0]), 4);
+  assert.equal(getAudioTimelineDuration(clips), 11);
+  assert.equal(getLongestAudioTrackDuration([
+    { id: 'audio-track-1', visible: true },
+    { id: 'audio-track-2', visible: false },
+  ], clips), 5);
 });
 
 test('sums sequence duration', () => {

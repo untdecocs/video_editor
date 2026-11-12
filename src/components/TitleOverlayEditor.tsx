@@ -5,7 +5,8 @@ type Props = {
   selectedTitleId: string;
   onAdd: () => void;
   onSelect: (id: string) => void;
-  onChange: (id: string, patch: Partial<TitleOverlay>) => void;
+  onChange: (id: string, patch: Partial<TitleOverlay>, coalescingKey?: string) => void;
+  onEndEditCoalescing: () => void;
   onRemove: (id: string) => void;
 };
 
@@ -13,7 +14,7 @@ const fieldClass = 'mt-1 w-full border border-neutral-200 bg-white px-2 py-2 tex
 const labelClass = 'block text-xs text-neutral-600';
 const formatTime = (time: number) => `${Math.floor(time / 60)}:${(time % 60).toFixed(1).padStart(4, '0')}`;
 
-export function TitleOverlayEditor({ titles, selectedTitleId, onAdd, onSelect, onChange, onRemove }: Props) {
+export function TitleOverlayEditor({ titles, selectedTitleId, onAdd, onSelect, onChange, onEndEditCoalescing, onRemove }: Props) {
   const selected = titles.find((title) => title.id === selectedTitleId);
 
   return (
@@ -57,13 +58,13 @@ export function TitleOverlayEditor({ titles, selectedTitleId, onAdd, onSelect, o
             <input className={fieldClass} type="number" min="0.1" max={Math.max(0.1, 86400 - selected.start)} step="0.1" value={selected.duration} onChange={(event) => onChange(selected.id, { duration: Math.max(0.1, Math.min(86400 - selected.start, Number(event.target.value) || 0.1)) })} />
           </label>
           <label className={labelClass}>Font size · {selected.fontSize}% of frame height
-            <input className="mt-2 w-full accent-moss" type="range" min="2" max="20" step="0.5" value={selected.fontSize} onChange={(event) => onChange(selected.id, { fontSize: Number(event.target.value) })} />
+            <input className="mt-2 w-full accent-moss" type="range" min="2" max="20" step="0.5" value={selected.fontSize} onChange={(event) => onChange(selected.id, { fontSize: Number(event.target.value) }, `title:${selected.id}:fontSize`)} onPointerUp={onEndEditCoalescing} onPointerCancel={onEndEditCoalescing} onKeyUp={onEndEditCoalescing} onBlur={onEndEditCoalescing} />
           </label>
           <label className={labelClass}>Horizontal position · {selected.x}%
-            <input className="mt-2 w-full accent-moss" type="range" min="0" max="100" step="1" value={selected.x} onChange={(event) => onChange(selected.id, { x: Number(event.target.value) })} />
+            <input className="mt-2 w-full accent-moss" type="range" min="0" max="100" step="1" value={selected.x} onChange={(event) => onChange(selected.id, { x: Number(event.target.value) }, `title:${selected.id}:x`)} onPointerUp={onEndEditCoalescing} onPointerCancel={onEndEditCoalescing} onKeyUp={onEndEditCoalescing} onBlur={onEndEditCoalescing} />
           </label>
           <label className={labelClass}>Vertical position · {selected.y}%
-            <input className="mt-2 w-full accent-moss" type="range" min="0" max="100" step="1" value={selected.y} onChange={(event) => onChange(selected.id, { y: Number(event.target.value) })} />
+            <input className="mt-2 w-full accent-moss" type="range" min="0" max="100" step="1" value={selected.y} onChange={(event) => onChange(selected.id, { y: Number(event.target.value) }, `title:${selected.id}:y`)} onPointerUp={onEndEditCoalescing} onPointerCancel={onEndEditCoalescing} onKeyUp={onEndEditCoalescing} onBlur={onEndEditCoalescing} />
           </label>
           <label className={labelClass}>Font family
             <select className={fieldClass} value={selected.fontFamily} onChange={(event) => onChange(selected.id, { fontFamily: event.target.value as TitleFontFamily })}>

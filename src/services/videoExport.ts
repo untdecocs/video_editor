@@ -1,14 +1,17 @@
-import type { TimelineAsset, TimelineClip, TimelineTrack } from './timeline';
-import { getActiveClips, getClipDuration, getClipSourceTime, getPreviousClipOnTrack } from './timeline';
+import type { AudioAsset, AudioClip, AudioTrack, TimelineAsset, TimelineClip, TimelineTrack } from './timeline';
+import { getActiveClips, getAudioClipDuration, getClipDuration, getClipSourceTime, getPreviousClipOnTrack } from './timeline';
 import { getActiveTitles, mapTitleToOutput, type TitleOverlay } from './titleOverlay';
 import { waitForImageDecode } from './imageMetadata';
 
 type ExportOptions = {
-  audioFile: File;
+  audioAssets: AudioAsset[];
+  audioTracks: AudioTrack[];
+  audioClips: AudioClip[];
   assets: TimelineAsset[];
   tracks: TimelineTrack[];
   clips: TimelineClip[];
   titles: TitleOverlay[];
+  duration: number;
   width: number;
   height: number;
   frameRate: number;
@@ -116,21 +119,21 @@ function waitForOutputMedia(
   });
 }
 
-async function validateOutput(blob: Blob, width: number, height: number, signal: AbortSignal) {
+async function validateOutput(blob: Blob, width: number, height: number, hasAudio: boolean, signal: AbortSignal) {
   const url = URL.createObjectURL(blob);
   const video = document.createElement('video');
-  const audio = new Audio();
+  const audio = hasAudio ? new Audio() : null;
   video.preload = 'auto';
   video.muted = true;
-  audio.preload = 'metadata';
+  if (audio) audio.preload = 'metadata';
   try {
     await waitForOutputMedia(video, url, signal);
-    await waitForOutputMedia(audio, url, signal);
+    if (audio) await waitForOutputMedia(audio, url, signal);
     if (video.videoWidth !== width || video.videoHeight !== height) {
       throw new Error(`The exported video dimensions do not match the selected ${width} × ${height} canvas.`);
     }
   } finally {
-    [video, audio].forEach((media) => {
+    [video, ...(audio ? [audio] : [])].forEach((media) => {
       media.pause();
       media.removeAttribute('src');
       media.load();
@@ -242,11 +245,14 @@ function drawTitle(context: CanvasRenderingContext2D, title: TitleOverlay, width
 }
 
 export async function renderVideo({
-  audioFile,
+  audioAssets,
+  audioTracks,
+  audioClips,
   assets,
   tracks,
   clips,
   titles,
+  duration,
   width,
   height,
   frameRate,
@@ -258,38 +264,43 @@ export async function renderVideo({
   throwIfAborted(signal);
   if (typeof MediaRecorder === 'undefined') throw new Error('Video export is not supported in this browser.');
   if (!clips.length) throw new Error('Add at least one visual clip before exporting.');
-
-  const audioUrl = URL.createObjectURL(audioFile);
-  const audio = new Audio();
-  audio.preload = 'auto';
   let audioContext: AudioContext | null = null;
+  let audioDestination: MediaStreamAudioDestinationNode | null = null;
   let canvasStream: MediaStream | null = null;
   let animationFrame = 0;
   const visuals = new Map<string, VisualElement>();
+  const audioSources: AudioBufferSourceNode[] = [];
 
   try {
-    onStatus('Preparing soundtrack…');
-    audioContext = new AudioContext();
-    const source = audioContext.createMediaElementSource(audio);
-    const destination = audioContext.createMediaStreamDestination();
-    source.connect(destination);
-    await raceWithAbort(audioContext.resume(), signal);
-
-    const audioDuration = await raceWithAbort(new Promise<number>((resolve, reject) => {
-      const timeout = window.setTimeout(() => reject(new Error('Timed out while loading the soundtrack.')), 15000);
-      audio.onloadedmetadata = () => {
-        window.clearTimeout(timeout);
-        if (!Number.isFinite(audio.duration) || audio.duration <= 0) {
-          reject(new Error('The soundtrack has no readable duration.'));
-        } else resolve(audio.duration);
-      };
-      audio.onerror = () => {
-        window.clearTimeout(timeout);
-        reject(new Error('The selected audio could not be decoded by this browser. Try a standard MP3 or WAV file.'));
-      };
-      audio.src = audioUrl;
-      audio.load();
-    }), signal);
+    if (!Number.isFinite(duration) || duration <= 0) throw new Error('The timeline has no valid export duration.');
+    const visibleTrackIds = new Set(audioTracks.filter((track) => track.visible).map((track) => track.id));
+    const activeAudioClips = audioClips.filter((clip) => visibleTrackIds.has(clip.trackId));
+    const audioBuffers = new Map<string, AudioBuffer>();
+    if (activeAudioClips.length) {
+      if (typeof AudioContext === 'undefined') throw new Error('Audio mixing is not supported in this browser.');
+      onStatus('Preparing audio tracks…');
+      audioContext = new AudioContext();
+      audioDestination = audioContext.createMediaStreamDestination();
+      await raceWithAbort(audioContext.resume(), signal);
+      for (const assetId of new Set(activeAudioClips.map((clip) => clip.assetId))) {
+        throwIfAborted(signal);
+        const asset = audioAssets.find((item) => item.id === assetId);
+        if (!asset) throw new Error('An audio clip references missing source media. Re-import the audio file.');
+        try {
+          const buffer = await raceWithAbort(
+            asset.file.arrayBuffer().then((data) => audioContext!.decodeAudioData(data)),
+            signal,
+          );
+          if (!Number.isFinite(buffer.duration) || buffer.duration <= 0) {
+            throw new Error('Decoded audio has no duration.');
+          }
+          audioBuffers.set(assetId, buffer);
+        } catch (error) {
+          if (signal.aborted) throw abortError();
+          throw new Error(`Could not decode audio "${asset.file.name}". Try a standard MP3 or WAV copy.`);
+        }
+      }
+    }
 
     onStatus('Loading visual media…');
     let loadedAssets = 0;
@@ -324,7 +335,7 @@ export async function renderVideo({
     canvasStream = canvas.captureStream(frameRate);
     const stream = new MediaStream([
       ...canvasStream.getVideoTracks(),
-      ...destination.stream.getAudioTracks(),
+      ...(audioDestination?.stream.getAudioTracks() ?? []),
     ]);
     const recorder = new MediaRecorder(stream, { mimeType });
     const chunks: Blob[] = [];
@@ -355,11 +366,11 @@ export async function renderVideo({
       getActiveTitles(titles, time).forEach((title) => drawTitle(context, title, width, height));
     };
 
-    const drawFrame = () => {
-      drawAtTime(audio.currentTime);
-      onProgress(Math.min(99, (audio.currentTime / audioDuration) * 100));
-      animationFrame = window.requestAnimationFrame(drawFrame);
-    };
+    let renderStartedAt = 0;
+    let fallbackStartedAt = 0;
+    const elapsedTime = () => audioContext
+      ? Math.max(0, audioContext.currentTime - renderStartedAt)
+      : Math.max(0, (performance.now() - fallbackStartedAt) / 1000);
 
     drawAtTime(0);
     onStatus('Rendering video…');
@@ -388,36 +399,60 @@ export async function renderVideo({
       recorder.ondataavailable = (event) => { if (event.data.size) chunks.push(event.data); };
       recorder.onerror = () => finish(new Error('The browser encountered an error while recording. Try another export format.'));
       recorder.onstop = () => finish();
-      audio.onended = () => {
-        onProgress(100);
-        if (recorder.state !== 'inactive') {
-          try { recorder.requestData(); } catch { /* stop() still flushes the final recording data */ }
-          recorder.stop();
-        }
-      };
-
       try {
-        recorder.start(Math.min(1000, Math.max(50, audioDuration * 250)));
+        recorder.start(1000);
         signal.addEventListener('abort', onAbort, { once: true });
         if (signal.aborted) {
           onAbort();
           return;
         }
+        if (audioContext) {
+          renderStartedAt = audioContext.currentTime + 0.1;
+          for (const clip of activeAudioClips) {
+            const buffer = audioBuffers.get(clip.assetId);
+            if (!buffer) continue;
+            const clipDuration = Math.min(getAudioClipDuration(clip), buffer.duration - clip.start);
+            if (clipDuration <= 0) continue;
+            const source = audioContext.createBufferSource();
+            const gain = audioContext.createGain();
+            source.buffer = buffer;
+            gain.gain.value = Math.max(0, Math.min(2, clip.volume));
+            source.connect(gain);
+            gain.connect(audioDestination!);
+            source.start(renderStartedAt + clip.timelinePosition, clip.start, clipDuration);
+            audioSources.push(source);
+          }
+        } else {
+          fallbackStartedAt = performance.now();
+        }
+        const drawFrame = () => {
+          const time = Math.min(duration, elapsedTime());
+          drawAtTime(time);
+          onProgress(Math.min(99, (time / duration) * 100));
+          if (time >= duration) {
+            onProgress(100);
+            if (recorder.state !== 'inactive') {
+              try { recorder.requestData(); } catch { /* stop() still flushes the final recording data */ }
+              recorder.stop();
+            }
+            return;
+          }
+          animationFrame = window.requestAnimationFrame(drawFrame);
+        };
         animationFrame = window.requestAnimationFrame(drawFrame);
-        void audio.play().catch(() => {
-          finish(new Error('The browser could not start soundtrack playback for export.'));
-          if (recorder.state !== 'inactive') recorder.stop();
-        });
       } catch (error) {
         finish(error instanceof Error ? error : new Error('The video recorder could not be started.'));
       }
     });
     onStatus('Validating video and soundtrack…');
-    await validateOutput(blob, width, height, signal);
+    await validateOutput(blob, width, height, audioSources.length > 0, signal);
     return blob;
   } finally {
     window.cancelAnimationFrame(animationFrame);
-    audio.pause();
+    audioSources.forEach((source) => {
+      try { source.stop(); } catch { /* Sources may already have reached their end. */ }
+      source.disconnect();
+    });
     canvasStream?.getTracks().forEach((track) => track.stop());
     audioContext?.close();
     visuals.forEach((visual) => {
@@ -427,6 +462,5 @@ export async function renderVideo({
         visual.load();
       }
     });
-    URL.revokeObjectURL(audioUrl);
   }
 }
